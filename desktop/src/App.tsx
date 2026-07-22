@@ -29,6 +29,30 @@ export default function App() {
   const [authRaw, setAuthRaw] = useState("");
   const [mask, setMask] = useState(true);
   const [workDir, setWorkDir] = useState("");
+  const workDirKey = useCallback((eng: string, name: string) => `pi-workdir:${eng}:${name}`, []);
+  const loadWorkDir = useCallback(
+    (eng: string, name: string) => {
+      try {
+        return localStorage.getItem(workDirKey(eng, name)) || "";
+      } catch {
+        return "";
+      }
+    },
+    [workDirKey]
+  );
+  const saveWorkDir = useCallback(
+    (eng: string, name: string, dir: string) => {
+      try {
+        const k = workDirKey(eng, name);
+        const t = dir.trim();
+        if (t) localStorage.setItem(k, t);
+        else localStorage.removeItem(k);
+      } catch {
+        /* ignore quota */
+      }
+    },
+    [workDirKey]
+  );
   const [args, setArgs] = useState("");
   const [sessionStatus, setSessionStatus] = useState("");
   const [sessionDetail, setSessionDetail] = useState("");
@@ -237,6 +261,7 @@ export default function App() {
       setAuthText("");
       setSessionStatus("No profile selected");
       setSessionDetail("");
+      setWorkDir("");
       return;
     }
     // Only load files if this name exists in the *current* engine's list.
@@ -244,6 +269,8 @@ export default function App() {
     if (!belongs) {
       return;
     }
+    // Restore remembered working directory for this profile
+    setWorkDir(loadWorkDir(engine.key, selected));
     let cancelled = false;
     (async () => {
       try {
@@ -326,6 +353,11 @@ export default function App() {
     if (!confirm(`Delete profile "${target}"? This cannot be undone.`)) return;
     try {
       await api.deleteProfile(engine.key, target);
+      try {
+        localStorage.removeItem(workDirKey(engine.key, target));
+      } catch {
+        /* ignore */
+      }
       if (selectedByEngine.current[engine.key] === target) {
         selectedByEngine.current[engine.key] = null;
       }
@@ -345,6 +377,9 @@ export default function App() {
     flash("info", "Copying…");
     try {
       const created = await api.copyProfile(engine.key, target);
+      // Copy remembered workdir too
+      const wd = loadWorkDir(engine.key, target);
+      if (wd) saveWorkDir(engine.key, created, wd);
       // Optimistic insert — no full list reparse wait
       const optimistic: ProfileSummary = src
         ? {
@@ -379,6 +414,7 @@ export default function App() {
       });
       selectedByEngine.current[engine.key] = created;
       setSelected(created);
+      if (wd) setWorkDir(wd);
       flash("ok", `Copied as ${created}`);
       // Soft refresh in background (optional consistency)
       void api.listProfiles(engine.key).then(setProfiles).catch(() => {});
@@ -405,6 +441,16 @@ export default function App() {
     }
     try {
       await api.renameProfile(engine.key, renaming, next);
+      // Migrate remembered workdir key
+      const oldWd = loadWorkDir(engine.key, renaming);
+      if (oldWd) {
+        saveWorkDir(engine.key, next, oldWd);
+        try {
+          localStorage.removeItem(workDirKey(engine.key, renaming));
+        } catch {
+          /* ignore */
+        }
+      }
       selectedByEngine.current[engine.key] = next;
       setSelected(next);
       setRenaming(null);
@@ -542,6 +588,8 @@ export default function App() {
   async function onLaunch(runCli: boolean) {
     if (!engine || !selected) return;
     const cliArgs = args.trim() ? args.trim().split(/\s+/) : [];
+    // Remember cwd for this profile
+    saveWorkDir(engine.key, selected, workDir);
     // Immediate feedback — spawn is fire-and-forget after this returns
     flash("info", runCli ? "Starting…" : "Opening terminal…");
     try {
@@ -717,9 +765,13 @@ export default function App() {
   }
 
   async function onBrowse() {
+    if (!engine || !selected) return;
     try {
       const p = await api.pickFolder();
-      if (p) setWorkDir(p);
+      if (p) {
+        setWorkDir(p);
+        saveWorkDir(engine.key, selected, p);
+      }
     } catch (e) {
       flash("error", String(e));
     }
@@ -1267,8 +1319,12 @@ Provider / base_url / model are in config.toml (Config tab).`}
                     <input
                       type="text"
                       value={workDir}
-                      onChange={(e) => setWorkDir(e.target.value)}
-                      placeholder="Project folder"
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setWorkDir(v);
+                        if (engine && selected) saveWorkDir(engine.key, selected, v);
+                      }}
+                      placeholder="Project folder (remembered per profile)"
                     />
                     <button className="btn" onClick={onBrowse}>
                       Browse
@@ -1286,6 +1342,7 @@ Provider / base_url / model are in config.toml (Config tab).`}
                 </div>
                 <div className="hint">
                   Opens PowerShell with {engine.homeEnv} set only for this profile.
+                  Working directory is remembered for each profile.
                 </div>
               </div>
             )}

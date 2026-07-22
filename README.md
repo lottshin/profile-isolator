@@ -17,9 +17,17 @@ Claude API key / base URL / model live in **`settings.json` → `env`** (`ANTHRO
 - Shared sessions (junctions to the default home, e.g. `~/.codex`) for cross-provider resume
 - Move entire profiles trees to another disk (Codex + Claude under one parent folder)
 - Cache inspection / clean (`.sandbox-bin`, `.tmp`) without deleting configs or sessions
+- Rename / duplicate / drag-reorder profiles
+- Working directory remembered **per profile**
 - Theme: Light / Dark / Auto
 
 ---
+
+## Download (Windows)
+
+Prebuilt exe (Release): see [Releases](https://github.com/lottshin/profile-isolator/releases).
+
+Or build from source below.
 
 ## Requirements
 
