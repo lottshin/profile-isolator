@@ -166,7 +166,10 @@ pub fn save_global_settings(settings: GlobalSettings) -> Result<(), String> {
 
 pub fn default_home(engine: &EngineInfo) -> PathBuf {
     let p = home_dir().join(&engine.default_home_name);
-    fs::canonicalize(&p).unwrap_or(p)
+    // Follow junctions (e.g. %USERPROFILE%\.codex -> F:\CodexData\.codex)
+    fs::canonicalize(&p)
+        .map(|c| PathBuf::from(strip_verbatim_prefix(&c.display().to_string())))
+        .unwrap_or(p)
 }
 
 pub fn shared_session_home(engine: &EngineInfo) -> PathBuf {
@@ -174,10 +177,44 @@ pub fn shared_session_home(engine: &EngineInfo) -> PathBuf {
         let t = v.trim();
         if !t.is_empty() {
             let p = PathBuf::from(t);
-            return fs::canonicalize(&p).unwrap_or(p);
+            return fs::canonicalize(&p)
+                .map(|c| PathBuf::from(strip_verbatim_prefix(&c.display().to_string())))
+                .unwrap_or(p);
         }
     }
+    // Prefer an existing peer profile's sessions junction target (authoritative)
+    if let Some(t) = discover_shared_home_from_profiles(engine) {
+        return t;
+    }
     default_home(engine)
+}
+
+/// If any profile already has sessions as a junction, use that target's parent as shared home.
+fn discover_shared_home_from_profiles(engine: &EngineInfo) -> Option<PathBuf> {
+    let root = profiles_root(engine);
+    let primary = engine.session_dirs.first()?;
+    let rd = fs::read_dir(&root).ok()?;
+    for e in rd.flatten() {
+        let p = e.path();
+        if !p.is_dir() {
+            continue;
+        }
+        let name = p.file_name()?.to_string_lossy();
+        if name.starts_with('.') || name.starts_with('_') {
+            continue;
+        }
+        let link = p.join(primary);
+        if !(is_reparse_point(&link) || link.is_symlink()) {
+            continue;
+        }
+        if let Ok(target) = fs::canonicalize(&link) {
+            let target = PathBuf::from(strip_verbatim_prefix(&target.display().to_string()));
+            if let Some(parent) = target.parent() {
+                return Some(parent.to_path_buf());
+            }
+        }
+    }
+    None
 }
 
 pub fn ensure_root(engine: &EngineInfo) -> Result<PathBuf, String> {
@@ -756,57 +793,79 @@ pub fn copy_profile(
     }
     let _ = set_profile_order(engine_key, order);
 
-    // Session junctions in background — never block the UI on mklink/sqlite
-    let eng_key = engine_key.to_string();
-    let dest_for_bg = dest_safe.clone();
-    std::thread::spawn(move || {
-        if let Ok(eng) = get_engine(&eng_key) {
-            if let Ok(p) = profile_path(&eng, &dest_for_bg) {
-                let _ = link_shared_sessions_fast(&eng, &p);
-            }
-        }
-    });
+    // Session share: do it synchronously for copy (mklink is ~40ms). Background
+    // was racing / failing silently so Launch saw "No sessions yet".
+    let _ = ensure_sessions_shared(&engine, &dst);
 
     Ok(dest_safe)
 }
 
-/// Fast session linking for a brand-new profile folder (dirs only — no sqlite copy).
-fn link_shared_sessions_fast(engine: &EngineInfo, profile: &Path) -> Result<(), String> {
-    let shared = if let Ok(v) = env::var(&engine.shared_home_env) {
-        let t = v.trim();
-        if !t.is_empty() {
-            PathBuf::from(t)
-        } else {
-            default_home(engine)
-        }
-    } else {
-        default_home(engine)
-    };
-
+/// Ensure profile has session dir junctions to the shared home. Fast path for empty folders.
+fn ensure_sessions_shared(engine: &EngineInfo, profile: &Path) -> Result<(), String> {
+    let shared = shared_session_home(engine);
     if same_path_fast(profile, &shared) {
         return Ok(());
     }
     let _ = fs::create_dir_all(&shared);
 
-    // One cmd.exe for all junctions — CREATE_NO_WINDOW avoids multi-second console spin-up
-    let mut parts: Vec<String> = Vec::new();
+    let mut need: Vec<(PathBuf, PathBuf)> = Vec::new();
     for dirname in &engine.session_dirs {
         let local = profile.join(dirname);
         let target = shared.join(dirname);
         let _ = fs::create_dir_all(&target);
-        if local.exists() || is_reparse_point(&local) {
+        if is_reparse_point(&local) || local.is_symlink() {
+            // already linked — good enough
             continue;
         }
-        parts.push(format!(
-            "mklink /J \"{}\" \"{}\"",
-            local.display(),
-            target.display()
-        ));
+        if local.exists() {
+            // Real directory (e.g. leftover empty) — remove then link
+            if local.is_dir() {
+                // only remove if empty-ish to avoid data loss; else use full enable_shared_sessions
+                let empty = fs::read_dir(&local)
+                    .map(|mut d| d.next().is_none())
+                    .unwrap_or(false);
+                if empty {
+                    let _ = fs::remove_dir(&local);
+                } else {
+                    // has content — fall back to full share (merge)
+                    return enable_shared_sessions_for_path(engine, profile).map(|_| ());
+                }
+            } else {
+                let _ = fs::remove_file(&local);
+            }
+        }
+        need.push((local, target));
     }
-    if parts.is_empty() {
+    if need.is_empty() {
         return Ok(());
     }
-    let script = parts.join(" & ");
+    create_junctions_batch(&need)
+}
+
+fn enable_shared_sessions_for_path(engine: &EngineInfo, profile: &Path) -> Result<serde_json::Value, String> {
+    // Reuse public API by name when possible
+    let name = profile
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| "bad profile path".to_string())?;
+    enable_shared_sessions(&engine.key, name)
+}
+
+fn create_junctions_batch(pairs: &[(PathBuf, PathBuf)]) -> Result<(), String> {
+    if pairs.is_empty() {
+        return Ok(());
+    }
+    let script = pairs
+        .iter()
+        .map(|(local, target)| {
+            format!(
+                "mklink /J \"{}\" \"{}\"",
+                local.display(),
+                target.display()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" & ");
     let mut cmd = Command::new("cmd.exe");
     cmd.args(["/C", &script]);
     #[cfg(windows)]
@@ -815,8 +874,23 @@ fn link_shared_sessions_fast(engine: &EngineInfo, profile: &Path) -> Result<(), 
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    let _ = cmd.output();
-    Ok(())
+    let out = cmd.output().map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        // still check if links exist
+        let ok = pairs
+            .iter()
+            .all(|(l, _)| is_reparse_point(l) || l.is_symlink());
+        if ok {
+            Ok(())
+        } else {
+            Err(format!(
+                "mklink failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ))
+        }
+    }
 }
 
 fn same_path_fast(a: &Path, b: &Path) -> bool {
@@ -1376,6 +1450,9 @@ pub fn launch_profile(
     if !path.is_dir() {
         return Err(format!("Profile '{name}' not found"));
     }
+    // Always ensure session junctions before Launch (copy/create may have skipped)
+    let _ = ensure_sessions_shared(&engine, &path);
+
     let wd = strip_verbatim_prefix(&resolve_work_dir(work_dir));
     // Skip canonicalize on Launch — it can stall on junctions/network; absolute path is enough
     let home = strip_verbatim_prefix(&path.display().to_string());
