@@ -341,15 +341,47 @@ export default function App() {
     if (!engine) return;
     const target = name || selected;
     if (!target) return;
+    const src = profiles.find((p) => p.name === target);
     flash("info", "Copying…");
     try {
       const created = await api.copyProfile(engine.key, target);
-      // Optimistic: insert a lightweight row then soft-refresh list only
+      // Optimistic insert — no full list reparse wait
+      const optimistic: ProfileSummary = src
+        ? {
+            ...src,
+            name: created,
+            path: src.path.replace(/[/\\][^/\\]+$/, `\\${created}`),
+            isActive: false,
+          }
+        : {
+            name: created,
+            path: `${root}\\${created}`,
+            model: "",
+            provider: "",
+            providerName: "",
+            baseUrl: "",
+            hasConfig: true,
+            hasAuth: true,
+            hasCatalog: false,
+            isActive: false,
+            sessionsShared: true,
+            sessionsShareTarget: sharedHome,
+          };
+      setProfiles((prev) => {
+        const without = prev.filter((p) => p.name !== created);
+        const idx = without.findIndex((p) => p.name === target);
+        if (idx >= 0) {
+          const next = [...without];
+          next.splice(idx + 1, 0, optimistic);
+          return next;
+        }
+        return [...without, optimistic];
+      });
       selectedByEngine.current[engine.key] = created;
       setSelected(created);
-      const list = await api.listProfiles(engine.key);
-      setProfiles(list);
       flash("ok", `Copied as ${created}`);
+      // Soft refresh in background (optional consistency)
+      void api.listProfiles(engine.key).then(setProfiles).catch(() => {});
     } catch (e) {
       flash("error", String(e));
     }

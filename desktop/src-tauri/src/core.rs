@@ -549,11 +549,25 @@ pub fn rename_profile(engine_key: &str, old_name: &str, new_name: &str) -> Resul
 }
 
 fn sanitize_codex(text: &str) -> String {
-    text.lines()
-        .filter(|l| !Regex::new(r"^\s*model_catalog_json\s*=").unwrap().is_match(l))
-        .collect::<Vec<_>>()
-        .join("\n")
-        + if text.ends_with('\n') { "\n" } else { "" }
+    // Compile once — previously rebuilt Regex per line (very slow on large configs)
+    let re = Regex::new(r"^\s*model_catalog_json\s*=").unwrap();
+    let mut out = String::with_capacity(text.len());
+    for (i, line) in text.lines().enumerate() {
+        if re.is_match(line) {
+            continue;
+        }
+        if i > 0 || text.starts_with('\n') {
+            // keep simple join
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(line);
+    }
+    if text.ends_with('\n') {
+        out.push('\n');
+    }
+    out
 }
 
 fn stub_primary(engine: &EngineInfo) -> String {
@@ -616,26 +630,22 @@ fn copy_profile_files(engine: &EngineInfo, src: &Path, dst: &Path, force: bool) 
         }
     }
     if prim_src.is_file() {
-        let raw = fs::read_to_string(&prim_src).map_err(|e| e.to_string())?;
-        let clean = if engine.key == "codex" {
-            sanitize_codex(&raw)
+        if engine.key == "codex" {
+            let raw = fs::read_to_string(&prim_src).map_err(|e| e.to_string())?;
+            write_text(&prim_dst, &sanitize_codex(&raw))?;
         } else {
-            raw
-        };
-        write_text(&prim_dst, &clean)?;
+            // Byte copy — faster than read-to-string for settings.json
+            fs::copy(&prim_src, &prim_dst).map_err(|e| e.to_string())?;
+        }
     } else if engine.key == "claude" {
-        // Some setups only have env in process; still create a usable settings.json stub
-        // if missing, so the profile is editable.
         write_text(&prim_dst, &stub_primary(engine))?;
     }
     if sec_src.is_file() {
         fs::copy(&sec_src, &sec_dst).map_err(|e| e.to_string())?;
     } else if engine.key == "claude" {
-        // .credentials.json is optional (MCP OAuth). Create empty object if absent.
         write_text(&sec_dst, "{}\n")?;
     }
 
-    // Claude Code may also use settings.local.json (permissions) — copy if present.
     if engine.key == "claude" {
         let local_src = src.join("settings.local.json");
         let local_dst = dst.join("settings.local.json");
@@ -721,16 +731,12 @@ pub fn copy_profile(
     };
 
     let dst = root.join(&dest_safe);
-    // Config/auth only — do not deep-copy session trees or sandbox cache
+    // Config/auth only — never touch sessions/sqlite/sandbox
     copy_profile_files(&engine, &src, &dst, true)?;
-    // New folder has no local sessions; just junction to shared (skip merge/rmdir walks)
-    let _ = link_shared_sessions_fast(&engine, &dst);
-    // Sandbox cache relocate is optional and can be slow — skip on copy; apply on next launch/create if needed
 
-    // Insert new name after source in order list without re-scanning all profiles
+    // Update order file (tiny JSON write)
     let mut order = load_profile_order(&root);
     if order.is_empty() {
-        // Seed names from directory listing only (no parse/canonicalize)
         order = fs::read_dir(&root)
             .map(|rd| {
                 rd.filter_map(|e| e.ok())
@@ -750,55 +756,70 @@ pub fn copy_profile(
     }
     let _ = set_profile_order(engine_key, order);
 
+    // Session junctions in background — never block the UI on mklink/sqlite
+    let eng_key = engine_key.to_string();
+    let dest_for_bg = dest_safe.clone();
+    std::thread::spawn(move || {
+        if let Ok(eng) = get_engine(&eng_key) {
+            if let Ok(p) = profile_path(&eng, &dest_for_bg) {
+                let _ = link_shared_sessions_fast(&eng, &p);
+            }
+        }
+    });
+
     Ok(dest_safe)
 }
 
-/// Fast session linking for a brand-new profile folder (no local session data to merge).
+/// Fast session linking for a brand-new profile folder (dirs only — no sqlite copy).
 fn link_shared_sessions_fast(engine: &EngineInfo, profile: &Path) -> Result<(), String> {
-    let shared = {
-        // Avoid canonicalize when possible — env override or default home path
-        if let Ok(v) = env::var(&engine.shared_home_env) {
-            let t = v.trim();
-            if !t.is_empty() {
-                PathBuf::from(t)
-            } else {
-                default_home(engine)
-            }
+    let shared = if let Ok(v) = env::var(&engine.shared_home_env) {
+        let t = v.trim();
+        if !t.is_empty() {
+            PathBuf::from(t)
         } else {
             default_home(engine)
         }
+    } else {
+        default_home(engine)
     };
+
     if same_path_fast(profile, &shared) {
         return Ok(());
     }
     let _ = fs::create_dir_all(&shared);
+
+    // One cmd.exe for all junctions — CREATE_NO_WINDOW avoids multi-second console spin-up
+    let mut parts: Vec<String> = Vec::new();
     for dirname in &engine.session_dirs {
         let local = profile.join(dirname);
         let target = shared.join(dirname);
         let _ = fs::create_dir_all(&target);
-        // Only create junction if nothing is there yet
-        if !local.exists() && !is_reparse_point(&local) {
-            let _ = create_junction_quiet(&local, &target);
-        }
-    }
-    for fname in &engine.session_files {
-        let local = profile.join(fname);
-        let target = shared.join(fname);
-        if local.exists() || local.is_symlink() {
+        if local.exists() || is_reparse_point(&local) {
             continue;
         }
-        if target.is_file() {
-            // Optional link/copy for session files — ignore errors to stay fast
-            if fs::hard_link(&target, &local).is_err() {
-                let _ = fs::copy(&target, &local);
-            }
-        }
+        parts.push(format!(
+            "mklink /J \"{}\" \"{}\"",
+            local.display(),
+            target.display()
+        ));
     }
+    if parts.is_empty() {
+        return Ok(());
+    }
+    let script = parts.join(" & ");
+    let mut cmd = Command::new("cmd.exe");
+    cmd.args(["/C", &script]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let _ = cmd.output();
     Ok(())
 }
 
 fn same_path_fast(a: &Path, b: &Path) -> bool {
-    // Cheap compare first; canonicalize only if both exist and strings differ
     if a == b {
         return true;
     }
@@ -808,28 +829,6 @@ fn same_path_fast(a: &Path, b: &Path) -> bool {
         return true;
     }
     same_path(a, b)
-}
-
-fn create_junction_quiet(link: &Path, target: &Path) -> Result<(), String> {
-    let _ = fs::create_dir_all(target);
-    if link.exists() || is_reparse_point(link) {
-        return Ok(());
-    }
-    let out = Command::new("cmd")
-        .args([
-            "/C",
-            "mklink",
-            "/J",
-            &link.display().to_string(),
-            &target.display().to_string(),
-        ])
-        .output()
-        .map_err(|e| e.to_string())?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
-    }
 }
 
 fn unique_copy_name(root: &Path, base: &str) -> String {
