@@ -65,3 +65,8 @@ local.*
 *.tsbuildinfo
 *.css.bak
 desktop/src/**/*.css.bak
+
+# Screenshot helpers / unredacted captures (never publish)
+docs/screenshots/_*.py
+docs/screenshots/*.original.png
+docs/screenshots/*-raw.png

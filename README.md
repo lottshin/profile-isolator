@@ -5,8 +5,10 @@
 Windows 桌面工具：为 **Codex** 与 **Claude Code** 管理多套隔离配置（不同供应商 / Key / 模型），会话可共享，方便跨配置 `resume`。
 
 <p align="center">
-  <img src="docs/screenshots/main-ui.png" alt="Profile Isolator 主界面" width="900" />
+  <img src="docs/screenshots/main-ui.png" alt="Profile Isolator 主界面（演示数据，已脱敏）" width="900" />
 </p>
+
+> 截图仅为界面示意：**profile 名 / 路径 / 接口地址均为示例**，不含真实 Key。
 
 <p align="center">
   <a href="https://github.com/lottshin/profile-isolator/releases"><img src="https://img.shields.io/github/v/release/lottshin/profile-isolator?label=release" alt="release" /></a>
@@ -112,6 +114,8 @@ MIT — 见 [LICENSE](LICENSE)。
 Desktop app for **Codex** and **Claude Code** multi-profile isolation on Windows: separate providers, keys, and models, with optional shared sessions so `resume` works across profiles.
 
 ![Main UI](docs/screenshots/main-ui.png)
+
+> Demo screenshot only — profile names and endpoints are placeholders.
 
 ## Why
 
