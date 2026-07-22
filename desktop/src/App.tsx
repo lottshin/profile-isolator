@@ -341,17 +341,17 @@ export default function App() {
     if (!engine) return;
     const target = name || selected;
     if (!target) return;
+    flash("info", "Copying…");
     try {
-      setBusy(true);
       const created = await api.copyProfile(engine.key, target);
+      // Optimistic: insert a lightweight row then soft-refresh list only
       selectedByEngine.current[engine.key] = created;
       setSelected(created);
-      await refresh(created);
+      const list = await api.listProfiles(engine.key);
+      setProfiles(list);
       flash("ok", `Copied as ${created}`);
     } catch (e) {
       flash("error", String(e));
-    } finally {
-      setBusy(false);
     }
   }
 

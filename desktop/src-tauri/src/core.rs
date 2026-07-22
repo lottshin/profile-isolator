@@ -356,19 +356,42 @@ fn parse_summary(engine: &EngineInfo, dir: &Path) -> ProfileSummary {
     } else {
         summarize_claude(&text)
     };
+    // Cheap active check — avoid canonicalize on every list
     let current = env::var(&engine.home_env).unwrap_or_default();
+    let dir_s = dir.display().to_string();
     let is_active = if current.trim().is_empty() {
         false
     } else {
-        same_path(Path::new(current.trim()), dir)
+        let c = current.trim().trim_end_matches(['\\', '/']);
+        let d = dir_s.trim_end_matches(['\\', '/']);
+        c.eq_ignore_ascii_case(d)
+            || c.eq_ignore_ascii_case(&format!(r"\\?\{d}"))
+            || Path::new(c)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| {
+                    dir.file_name()
+                        .and_then(|x| x.to_str())
+                        .map(|x| x.eq_ignore_ascii_case(n))
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false)
     };
-    let shared = is_sessions_shared(engine, dir);
+    // Sessions shared: primary session dir is a junction/symlink (no canonicalize)
+    let shared = engine
+        .session_dirs
+        .first()
+        .map(|primary| {
+            let link = dir.join(primary);
+            link.exists() && (is_reparse_point(&link) || link.is_symlink())
+        })
+        .unwrap_or(false);
     ProfileSummary {
         name: dir
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_default(),
-        path: dir.display().to_string(),
+        path: dir_s,
         model,
         provider,
         provider_name,
@@ -379,7 +402,17 @@ fn parse_summary(engine: &EngineInfo, dir: &Path) -> ProfileSummary {
         is_active,
         sessions_shared: shared,
         sessions_share_target: if shared {
-            shared_session_home(engine).display().to_string()
+            // Display only — no canonicalize
+            if let Ok(v) = env::var(&engine.shared_home_env) {
+                let t = v.trim();
+                if !t.is_empty() {
+                    t.to_string()
+                } else {
+                    default_home(engine).display().to_string()
+                }
+            } else {
+                default_home(engine).display().to_string()
+            }
         } else {
             String::new()
         },
@@ -688,16 +721,26 @@ pub fn copy_profile(
     };
 
     let dst = root.join(&dest_safe);
+    // Config/auth only — do not deep-copy session trees or sandbox cache
     copy_profile_files(&engine, &src, &dst, true)?;
-    let _ = enable_shared_sessions(engine_key, &dest_safe);
-    let _ = apply_sandbox_cache_if_configured(engine_key, &dest_safe);
+    // New folder has no local sessions; just junction to shared (skip merge/rmdir walks)
+    let _ = link_shared_sessions_fast(&engine, &dst);
+    // Sandbox cache relocate is optional and can be slow — skip on copy; apply on next launch/create if needed
 
-    // Insert new name after source in order list (or append)
+    // Insert new name after source in order list without re-scanning all profiles
     let mut order = load_profile_order(&root);
     if order.is_empty() {
-        if let Ok(list) = list_profiles(engine_key) {
-            order = list.into_iter().map(|p| p.name).collect();
-        }
+        // Seed names from directory listing only (no parse/canonicalize)
+        order = fs::read_dir(&root)
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .filter(|e| e.path().is_dir())
+                    .filter_map(|e| e.file_name().into_string().ok())
+                    .filter(|s| !s.starts_with('.') && !s.starts_with('_') && s != &dest_safe)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        order.sort_by(|a, b| a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase()));
     }
     order.retain(|n| n != &dest_safe);
     if let Some(pos) = order.iter().position(|n| n == &src_safe) {
@@ -708,6 +751,85 @@ pub fn copy_profile(
     let _ = set_profile_order(engine_key, order);
 
     Ok(dest_safe)
+}
+
+/// Fast session linking for a brand-new profile folder (no local session data to merge).
+fn link_shared_sessions_fast(engine: &EngineInfo, profile: &Path) -> Result<(), String> {
+    let shared = {
+        // Avoid canonicalize when possible — env override or default home path
+        if let Ok(v) = env::var(&engine.shared_home_env) {
+            let t = v.trim();
+            if !t.is_empty() {
+                PathBuf::from(t)
+            } else {
+                default_home(engine)
+            }
+        } else {
+            default_home(engine)
+        }
+    };
+    if same_path_fast(profile, &shared) {
+        return Ok(());
+    }
+    let _ = fs::create_dir_all(&shared);
+    for dirname in &engine.session_dirs {
+        let local = profile.join(dirname);
+        let target = shared.join(dirname);
+        let _ = fs::create_dir_all(&target);
+        // Only create junction if nothing is there yet
+        if !local.exists() && !is_reparse_point(&local) {
+            let _ = create_junction_quiet(&local, &target);
+        }
+    }
+    for fname in &engine.session_files {
+        let local = profile.join(fname);
+        let target = shared.join(fname);
+        if local.exists() || local.is_symlink() {
+            continue;
+        }
+        if target.is_file() {
+            // Optional link/copy for session files — ignore errors to stay fast
+            if fs::hard_link(&target, &local).is_err() {
+                let _ = fs::copy(&target, &local);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn same_path_fast(a: &Path, b: &Path) -> bool {
+    // Cheap compare first; canonicalize only if both exist and strings differ
+    if a == b {
+        return true;
+    }
+    let sa = a.to_string_lossy();
+    let sb = b.to_string_lossy();
+    if sa.eq_ignore_ascii_case(&sb) {
+        return true;
+    }
+    same_path(a, b)
+}
+
+fn create_junction_quiet(link: &Path, target: &Path) -> Result<(), String> {
+    let _ = fs::create_dir_all(target);
+    if link.exists() || is_reparse_point(link) {
+        return Ok(());
+    }
+    let out = Command::new("cmd")
+        .args([
+            "/C",
+            "mklink",
+            "/J",
+            &link.display().to_string(),
+            &target.display().to_string(),
+        ])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
 }
 
 fn unique_copy_name(root: &Path, base: &str) -> String {
