@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type DragEvent as ReactDragEvent,
+} from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api, EngineInfo, ProfileSummary, CacheReport, formatBytes } from "./lib/api";
 
@@ -53,6 +60,11 @@ export default function App() {
   const [moreOpen, setMoreOpen] = useState(false);
   const moreRef = useRef<HTMLDivElement | null>(null);
   const moreLeaveTimer = useRef<number | null>(null);
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const renameInputRef = useRef<HTMLInputElement | null>(null);
+  const dragName = useRef<string | null>(null);
+  const [dragOver, setDragOver] = useState<string | null>(null);
 
   const engine = useMemo(
     () => engines.find((e) => e.key === engineKey) ?? engines[0],
@@ -324,6 +336,75 @@ export default function App() {
     } catch (e) {
       flash("error", String(e));
     }
+  }
+
+  function startRename(name: string) {
+    setRenaming(name);
+    setRenameValue(name);
+    window.setTimeout(() => {
+      renameInputRef.current?.focus();
+      renameInputRef.current?.select();
+    }, 0);
+  }
+
+  async function commitRename() {
+    if (!engine || !renaming) return;
+    const next = renameValue.trim();
+    if (!next || next === renaming) {
+      setRenaming(null);
+      return;
+    }
+    try {
+      await api.renameProfile(engine.key, renaming, next);
+      selectedByEngine.current[engine.key] = next;
+      setSelected(next);
+      setRenaming(null);
+      await refresh(next);
+      flash("ok", `Renamed to ${next}`);
+    } catch (e) {
+      flash("error", String(e));
+    }
+  }
+
+  async function persistOrder(next: ProfileSummary[]) {
+    if (!engine) return;
+    setProfiles(next);
+    try {
+      await api.setProfileOrder(
+        engine.key,
+        next.map((p) => p.name)
+      );
+    } catch (e) {
+      flash("error", String(e));
+      await refresh(selected);
+    }
+  }
+
+  function onDragStartItem(name: string, e: ReactDragEvent) {
+    dragName.current = name;
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", name);
+  }
+
+  function onDragOverItem(name: string, e: ReactDragEvent) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    if (dragOver !== name) setDragOver(name);
+  }
+
+  async function onDropItem(targetName: string, e: ReactDragEvent) {
+    e.preventDefault();
+    const from = dragName.current || e.dataTransfer.getData("text/plain");
+    dragName.current = null;
+    setDragOver(null);
+    if (!from || from === targetName) return;
+    const list = [...profiles];
+    const fi = list.findIndex((p) => p.name === from);
+    const ti = list.findIndex((p) => p.name === targetName);
+    if (fi < 0 || ti < 0) return;
+    const [item] = list.splice(fi, 1);
+    list.splice(ti, 0, item);
+    await persistOrder(list);
   }
 
   async function onSaveConfig() {
@@ -637,28 +718,96 @@ export default function App() {
           {profiles.map((p) => (
             <div
               key={p.name}
-              className={`item ${selected === p.name ? "on" : ""}`}
+              className={`item ${selected === p.name ? "on" : ""}${
+                dragOver === p.name ? " drop-target" : ""
+              }`}
+              draggable={renaming !== p.name}
+              onDragStart={(e) => onDragStartItem(p.name, e)}
+              onDragOver={(e) => onDragOverItem(p.name, e)}
+              onDragLeave={() => {
+                if (dragOver === p.name) setDragOver(null);
+              }}
+              onDrop={(e) => void onDropItem(p.name, e)}
+              onDragEnd={() => {
+                dragName.current = null;
+                setDragOver(null);
+              }}
               onClick={() => {
+                if (renaming) return;
                 selectedByEngine.current[engine.key] = p.name;
                 setSelected(p.name);
+              }}
+              onDoubleClick={(e) => {
+                e.stopPropagation();
+                startRename(p.name);
               }}
               role="button"
               tabIndex={0}
               onKeyDown={(e) => {
+                if (renaming === p.name) return;
                 if (e.key === "Enter" || e.key === " ") {
                   e.preventDefault();
                   selectedByEngine.current[engine.key] = p.name;
                   setSelected(p.name);
                 }
+                if (e.key === "F2") {
+                  e.preventDefault();
+                  startRename(p.name);
+                }
               }}
             >
+              <span className="drag-handle" title="Drag to reorder" aria-hidden>
+                ⋮⋮
+              </span>
               <div className="item-main">
-                <div className="name">{p.name}</div>
+                {renaming === p.name ? (
+                  <input
+                    ref={renameInputRef}
+                    className="rename-input"
+                    value={renameValue}
+                    onChange={(e) => setRenameValue(e.target.value)}
+                    onClick={(e) => e.stopPropagation()}
+                    onKeyDown={(e) => {
+                      e.stopPropagation();
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        void commitRename();
+                      } else if (e.key === "Escape") {
+                        e.preventDefault();
+                        setRenaming(null);
+                      }
+                    }}
+                    onBlur={() => void commitRename()}
+                  />
+                ) : (
+                  <div className="name" title="Double-click or F2 to rename">
+                    {p.name}
+                  </div>
+                )}
                 <div className="model">{p.model || "No model"}</div>
                 <div className="url">{p.baseUrl || "—"}</div>
               </div>
               <div className="item-actions">
                 {p.isActive && <span className="chip g">In use</span>}
+                <button
+                  type="button"
+                  className="icon-del"
+                  title={`Rename “${p.name}”`}
+                  aria-label={`Rename ${p.name}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    startRename(p.name);
+                  }}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden>
+                    <path
+                      d="M4 20h4l10.5-10.5a1.5 1.5 0 0 0 0-2.12L16.62 5.5a1.5 1.5 0 0 0-2.12 0L4 16v4z"
+                      stroke="currentColor"
+                      strokeWidth="1.6"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                </button>
                 <button
                   type="button"
                   className="icon-del"
@@ -668,7 +817,6 @@ export default function App() {
                     e.stopPropagation();
                     selectedByEngine.current[engine.key] = p.name;
                     setSelected(p.name);
-                    // slight delay so selected is set for confirm text
                     window.setTimeout(() => onDelete(p.name), 0);
                   }}
                 >

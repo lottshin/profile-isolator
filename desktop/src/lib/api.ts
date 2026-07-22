@@ -75,6 +75,10 @@ export const api = {
     invoke<string>("cmd_create_profile", { engine, name, fromCurrent, force }),
   deleteProfile: (engine: string, name: string) =>
     invoke<void>("cmd_delete_profile", { engine, name }),
+  renameProfile: (engine: string, oldName: string, newName: string) =>
+    invoke<string>("cmd_rename_profile", { engine, oldName, newName }),
+  setProfileOrder: (engine: string, names: string[]) =>
+    invoke<void>("cmd_set_profile_order", { engine, names }),
   readFile: (engine: string, name: string, which: "config" | "auth") =>
     invoke<string>("cmd_read_file", { engine, name, which }),
   saveFile: (engine: string, name: string, which: "config" | "auth", content: string) =>

@@ -47,6 +47,20 @@ fn cmd_delete_profile(engine: String, name: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn cmd_rename_profile(
+    engine: String,
+    old_name: String,
+    new_name: String,
+) -> Result<String, String> {
+    rename_profile(&engine, &old_name, &new_name)
+}
+
+#[tauri::command]
+fn cmd_set_profile_order(engine: String, names: Vec<String>) -> Result<(), String> {
+    set_profile_order(&engine, names)
+}
+
+#[tauri::command]
 fn cmd_read_file(engine: String, name: String, which: String) -> Result<String, String> {
     read_profile_file(&engine, &name, &which)
 }
@@ -172,16 +186,6 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
-        .setup(|app| {
-            let window = app.get_webview_window("main").unwrap();
-            // Inject custom scrollbar styles on startup
-            window.eval(include_str!("webview_init.js"))?;
-            // Resolve codex/claude paths once so Launch does not wait on where.exe
-            std::thread::spawn(|| {
-                warm_cli_cache();
-            });
-            Ok(())
-        })
         .invoke_handler(tauri::generate_handler![
             cmd_engines,
             cmd_list_profiles,
@@ -190,6 +194,8 @@ pub fn run() {
             cmd_shared_home,
             cmd_create_profile,
             cmd_delete_profile,
+            cmd_rename_profile,
+            cmd_set_profile_order,
             cmd_read_file,
             cmd_save_file,
             cmd_mask_secret,
@@ -212,7 +218,12 @@ pub fn run() {
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_title("Profile Isolator");
+                let _ = window.eval(include_str!("webview_init.js"));
             }
+            // Resolve codex/claude paths once so Launch does not wait on where.exe
+            std::thread::spawn(|| {
+                warm_cli_cache();
+            });
             Ok(())
         })
         .run(tauri::generate_context!())

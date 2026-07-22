@@ -386,6 +386,38 @@ fn parse_summary(engine: &EngineInfo, dir: &Path) -> ProfileSummary {
     }
 }
 
+fn order_file(root: &Path) -> PathBuf {
+    root.join(".profile-order.json")
+}
+
+fn load_profile_order(root: &Path) -> Vec<String> {
+    let p = order_file(root);
+    if !p.is_file() {
+        return vec![];
+    }
+    let Ok(raw) = fs::read_to_string(&p) else {
+        return vec![];
+    };
+    serde_json::from_str::<Vec<String>>(&raw).unwrap_or_default()
+}
+
+/// Persist sidebar order (folder names). Missing names are ignored on next load.
+pub fn set_profile_order(engine_key: &str, names: Vec<String>) -> Result<(), String> {
+    let engine = get_engine(engine_key)?;
+    let root = ensure_root(&engine)?;
+    let mut cleaned = Vec::new();
+    let mut seen = HashSet::new();
+    for n in names {
+        let Ok(s) = safe_name(&n) else { continue };
+        if seen.insert(s.clone()) {
+            cleaned.push(s);
+        }
+    }
+    let text = serde_json::to_string_pretty(&cleaned).map_err(|e| e.to_string())?;
+    write_text(&order_file(&root), &format!("{text}\n"))?;
+    Ok(())
+}
+
 pub fn list_profiles(engine_key: &str) -> Result<Vec<ProfileSummary>, String> {
     let engine = get_engine(engine_key)?;
     let root = profiles_root(&engine);
@@ -408,16 +440,79 @@ pub fn list_profiles(engine_key: &str) -> Result<Vec<ProfileSummary>, String> {
                     .unwrap_or(true)
         })
         .collect();
+
+    let order = load_profile_order(&root);
+    let mut rank: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (i, n) in order.iter().enumerate() {
+        rank.insert(n.to_ascii_lowercase(), i);
+    }
     dirs.sort_by(|a, b| {
-        a.file_name()
-            .unwrap()
-            .to_ascii_lowercase()
-            .cmp(&b.file_name().unwrap().to_ascii_lowercase())
+        let na = a
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let nb = b
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let ra = rank.get(&na.to_ascii_lowercase()).copied().unwrap_or(usize::MAX);
+        let rb = rank.get(&nb.to_ascii_lowercase()).copied().unwrap_or(usize::MAX);
+        ra.cmp(&rb)
+            .then_with(|| na.to_ascii_lowercase().cmp(&nb.to_ascii_lowercase()))
     });
     for d in dirs {
         items.push(parse_summary(&engine, &d));
     }
     Ok(items)
+}
+
+/// Rename a profile folder. Does not touch shared session junctions under the default home.
+pub fn rename_profile(engine_key: &str, old_name: &str, new_name: &str) -> Result<String, String> {
+    let engine = get_engine(engine_key)?;
+    let old_safe = safe_name(old_name)?;
+    let new_safe = safe_name(new_name)?;
+    if old_safe.eq_ignore_ascii_case(&new_safe) && old_safe != new_safe {
+        // case-only rename on Windows needs a two-step move
+    } else if old_safe == new_safe {
+        return Ok(profile_path(&engine, &old_safe)?.display().to_string());
+    }
+    let root = profiles_root(&engine);
+    let from = root.join(&old_safe);
+    let to = root.join(&new_safe);
+    if !from.is_dir() {
+        return Err(format!("Profile '{old_safe}' not found"));
+    }
+    if to.exists() && !from
+        .canonicalize()
+        .ok()
+        .zip(to.canonicalize().ok())
+        .map(|(a, b)| a == b)
+        .unwrap_or(false)
+    {
+        return Err(format!("Profile already exists: {new_safe}"));
+    }
+
+    // Windows case-only rename: temp hop
+    if old_safe.eq_ignore_ascii_case(&new_safe) && old_safe != new_safe {
+        let tmp = root.join(format!(".__rename_{}_{}", std::process::id(), old_safe));
+        fs::rename(&from, &tmp).map_err(|e| format!("Rename failed: {e}"))?;
+        fs::rename(&tmp, &to).map_err(|e| format!("Rename failed: {e}"))?;
+    } else {
+        fs::rename(&from, &to).map_err(|e| format!("Rename failed: {e}"))?;
+    }
+
+    // Keep sidebar order in sync
+    let mut order = load_profile_order(&root);
+    if !order.is_empty() {
+        for n in order.iter_mut() {
+            if n == &old_safe {
+                *n = new_safe.clone();
+            }
+        }
+        let _ = set_profile_order(engine_key, order);
+    }
+
+    Ok(to.display().to_string())
 }
 
 fn sanitize_codex(text: &str) -> String {

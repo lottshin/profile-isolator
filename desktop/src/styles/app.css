@@ -263,7 +263,31 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 :root[data-theme="dark"] .list { scrollbar-color: rgba(255, 255, 255, 0.16) transparent; }
 :root[data-theme="dark"] .list::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.14); border: 2px solid transparent; background-clip: padding-box; }
 :root[data-theme="dark"] .list::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.24); border: 2px solid transparent; background-clip: padding-box; }
-.item { width: 100%; text-align: left; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 9px 10px; border-radius: 10px; transition: background 0.12s var(--ease), box-shadow 0.12s var(--ease); }
+.item { width: 100%; text-align: left; display: grid; grid-template-columns: 14px minmax(0, 1fr) auto; gap: 6px; align-items: center; padding: 9px 10px; border-radius: 10px; transition: background 0.12s var(--ease), box-shadow 0.12s var(--ease); cursor: grab; }
+.item:active { cursor: grabbing; }
+.item.drop-target { box-shadow: inset 0 0 0 1.5px var(--blue); background: var(--active-bg); }
+.drag-handle {
+  font-size: 10px;
+  line-height: 1;
+  letter-spacing: -1px;
+  color: var(--t4);
+  user-select: none;
+  opacity: 0.55;
+}
+.item:hover .drag-handle { opacity: 0.9; color: var(--t3); }
+.rename-input {
+  width: 100%;
+  height: 26px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--lift);
+  color: var(--t1);
+  padding: 0 8px;
+  font-size: 13.5px;
+  font-weight: 600;
+  outline: none;
+  box-shadow: inset 0 0 0 1px var(--hair), 0 0 0 2px color-mix(in srgb, var(--blue) 28%, transparent);
+}
 .item:hover { background: var(--hover); }
 .item.on { background: var(--active-bg); box-shadow: inset 0 0 0 1px var(--active-ring); }
 .name { font-size: 13.5px; font-weight: 600; letter-spacing: -0.015em; line-height: 1.25; }
@@ -354,10 +378,7 @@ input[type="text"]:focus { box-shadow: inset 0 0 0 1px var(--hair), 0 0 0 2px co
 .toast.ok { color: var(--green); }
 
 
-/* Profile row with delete on the right */
-.item {
-  cursor: pointer;
-}
+/* Profile row with actions on the right */
 .item-main { min-width: 0; }
 .item-actions {
   display: flex;
