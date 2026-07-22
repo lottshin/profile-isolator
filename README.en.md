@@ -23,16 +23,20 @@
   <img src="https://img.shields.io/badge/platform-Windows%2010%2F11-lightgrey" alt="platform" />
 </p>
 
-## The problem this solves
+## Problem
 
-| You want | Without this tool | With Profile Isolator |
-|----------|-------------------|------------------------|
-| Terminal A → Codex on provider X | Edit global `~/.codex` | Launch profile “provider X” |
-| Terminal B → Codex on provider Y **at the same time** | Change global config again; A breaks | Launch profile “provider Y” |
-| Claude Code also needs another vendor | Edit `~/.claude` | Same workflow on the Claude tab |
-| Resume the same project under another vendor | Sessions don’t line up | Optional shared sessions + same working directory |
+When running multiple CLI instances on Windows, a common need is:
 
-**In short: multiple Codex / Claude Code processes in parallel, each on a different provider.**
+| Scenario | Default global config | With this tool |
+|----------|----------------------|----------------|
+| Terminal A: Codex + provider X | Edit `~/.codex` | Launch profile “provider X” |
+| Terminal B: Codex + provider Y **at the same time** | Change global config again; A is affected | Launch profile “provider Y” |
+| Claude Code on another vendor | Edit `~/.claude` | Same workflow on the Claude tab |
+| `resume` the same project under another vendor | Session dirs may not line up | Optional shared sessions + same working directory |
+
+Each profile uses its own config directory; the app launches the CLI with the matching env var. Session storage can be shared when needed.
+
+**Goal: multiple Codex / Claude Code processes in parallel, each connected to a different provider, without config cross-talk.**
 
 How:
 
