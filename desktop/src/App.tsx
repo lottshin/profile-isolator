@@ -337,6 +337,24 @@ export default function App() {
     }
   }
 
+  async function onCopy(name?: string) {
+    if (!engine) return;
+    const target = name || selected;
+    if (!target) return;
+    try {
+      setBusy(true);
+      const created = await api.copyProfile(engine.key, target);
+      selectedByEngine.current[engine.key] = created;
+      setSelected(created);
+      await refresh(created);
+      flash("ok", `Copied as ${created}`);
+    } catch (e) {
+      flash("error", String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function startRename(name: string) {
     setRenaming(name);
     setRenameValue(name);
@@ -870,6 +888,26 @@ export default function App() {
                       strokeWidth="1.6"
                       strokeLinecap="round"
                       strokeLinejoin="round"
+                    />
+                  </svg>
+                </button>
+                <button
+                  type="button"
+                  className="icon-action"
+                  title={`Duplicate “${p.name}”`}
+                  aria-label={`Duplicate ${p.name}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void onCopy(p.name);
+                  }}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden>
+                    <rect x="9" y="9" width="11" height="11" rx="2" stroke="currentColor" strokeWidth="1.6" />
+                    <path
+                      d="M5 15V7a2 2 0 0 1 2-2h8"
+                      stroke="currentColor"
+                      strokeWidth="1.6"
+                      strokeLinecap="round"
                     />
                   </svg>
                 </button>

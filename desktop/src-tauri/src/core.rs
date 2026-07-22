@@ -647,7 +647,81 @@ pub fn delete_profile(engine_key: &str, name: &str) -> Result<(), String> {
     if !path.is_dir() {
         return Err(format!("Profile '{name}' not found"));
     }
-    fs::remove_dir_all(path).map_err(|e| e.to_string())
+    fs::remove_dir_all(path).map_err(|e| e.to_string())?;
+    // Drop from order file if present
+    let root = profiles_root(&engine);
+    let mut order = load_profile_order(&root);
+    if !order.is_empty() {
+        let before = order.len();
+        order.retain(|n| n != name);
+        if order.len() != before {
+            let _ = set_profile_order(engine_key, order);
+        }
+    }
+    Ok(())
+}
+
+/// Duplicate a profile folder (config/auth only; sessions re-shared to default home).
+/// `new_name` optional — defaults to "{name}-copy", "{name}-copy-2", ...
+pub fn copy_profile(
+    engine_key: &str,
+    source_name: &str,
+    new_name: Option<String>,
+) -> Result<String, String> {
+    let engine = get_engine(engine_key)?;
+    let src_safe = safe_name(source_name)?;
+    let src = profile_path(&engine, &src_safe)?;
+    if !src.is_dir() {
+        return Err(format!("Profile '{src_safe}' not found"));
+    }
+    ensure_root(&engine)?;
+    let root = profiles_root(&engine);
+
+    let dest_safe = if let Some(n) = new_name {
+        let s = safe_name(&n)?;
+        if root.join(&s).exists() {
+            return Err(format!("Profile already exists: {s}"));
+        }
+        s
+    } else {
+        unique_copy_name(&root, &src_safe)
+    };
+
+    let dst = root.join(&dest_safe);
+    copy_profile_files(&engine, &src, &dst, true)?;
+    let _ = enable_shared_sessions(engine_key, &dest_safe);
+    let _ = apply_sandbox_cache_if_configured(engine_key, &dest_safe);
+
+    // Insert new name after source in order list (or append)
+    let mut order = load_profile_order(&root);
+    if order.is_empty() {
+        if let Ok(list) = list_profiles(engine_key) {
+            order = list.into_iter().map(|p| p.name).collect();
+        }
+    }
+    order.retain(|n| n != &dest_safe);
+    if let Some(pos) = order.iter().position(|n| n == &src_safe) {
+        order.insert(pos + 1, dest_safe.clone());
+    } else {
+        order.push(dest_safe.clone());
+    }
+    let _ = set_profile_order(engine_key, order);
+
+    Ok(dest_safe)
+}
+
+fn unique_copy_name(root: &Path, base: &str) -> String {
+    let candidate = format!("{base}-copy");
+    if !root.join(&candidate).exists() {
+        return candidate;
+    }
+    for i in 2..1000 {
+        let c = format!("{base}-copy-{i}");
+        if !root.join(&c).exists() {
+            return c;
+        }
+    }
+    format!("{base}-copy-{}", std::process::id())
 }
 
 pub fn read_profile_file(engine_key: &str, name: &str, which: &str) -> Result<String, String> {

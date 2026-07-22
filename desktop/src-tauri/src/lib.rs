@@ -47,6 +47,15 @@ fn cmd_delete_profile(engine: String, name: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn cmd_copy_profile(
+    engine: String,
+    source_name: String,
+    new_name: Option<String>,
+) -> Result<String, String> {
+    copy_profile(&engine, &source_name, new_name)
+}
+
+#[tauri::command]
 fn cmd_rename_profile(
     engine: String,
     old_name: String,
@@ -194,6 +203,7 @@ pub fn run() {
             cmd_shared_home,
             cmd_create_profile,
             cmd_delete_profile,
+            cmd_copy_profile,
             cmd_rename_profile,
             cmd_set_profile_order,
             cmd_read_file,
