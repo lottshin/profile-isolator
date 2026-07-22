@@ -1,0 +1,67 @@
+# Dependencies & build outputs
+node_modules/
+desktop/node_modules/
+desktop/src-tauri/target/
+desktop/dist/
+dist/
+build/
+**/__pycache__/
+*.pyc
+*.pyo
+
+# Tooling / packages
+*.spec
+*.exe
+*.msi
+*.nsis
+*.zip
+*.7z
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Logs & local scratch
+*.log
+_clean_out.txt
+_gui_test.log
+_t/
+**/_tmp/
+**/.tmp/
+
+# Local helper scripts (machine-specific)
+_clean_c_disk.ps1
+_write_*.py
+_fix_*.py
+_add_*.py
+_patch_*.py
+_rebuild.bat
+_tauri_build.bat
+desktop/_*.py
+desktop/_*.bat
+desktop/_*.cmd
+
+# Secrets & personal config (never commit)
+.env
+.env.*
+**/.env
+**/auth.json
+**/.credentials.json
+**/*secret*
+**/*credentials*
+**/.profile-isolator/
+**/CodexProfiles/
+**/ClaudeProfiles/
+
+# Optional local overrides
+local.*
+*.local.toml
+*.local.json
+
+# TypeScript / Vite intermediates
+*.tsbuildinfo
+*.css.bak
+desktop/src/**/*.css.bak
