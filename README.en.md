@@ -88,10 +88,6 @@ npm install
 npm run tauri build -- --no-bundle
 ```
 
-## Security
-
-Never commit live API keys or credential files. Redact before sharing screenshots.
-
 ## License
 
 MIT — [LICENSE](LICENSE).

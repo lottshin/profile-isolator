@@ -103,11 +103,6 @@ npm run tauri build -- --no-bundle   # 产出 exe
 
 可选：`python desktop/make_ios_icon.py` 重新生成图标。
 
-## 安全提示
-
-- **不要**把含真实 Key 的配置提交到仓库或发到公开截图  
-- 分享配置前请脱敏  
-
 ## 项目结构
 
 ```text
