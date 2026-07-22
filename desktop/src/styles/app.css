@@ -276,7 +276,16 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   cursor: pointer;
   user-select: none;
 }
-.item.dragging { opacity: 0.45; }
+.list.reordering {
+  cursor: grabbing;
+  user-select: none;
+}
+.list.reordering .item {
+  cursor: grabbing;
+}
+.item.dragging {
+  opacity: 0.4;
+}
 .item.drop-target {
   box-shadow: inset 0 2px 0 0 var(--blue);
   background: var(--active-bg);
@@ -292,10 +301,11 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   color: var(--t4);
   background: transparent;
   cursor: grab;
+  touch-action: none;
   opacity: 0;
   transition: opacity 0.12s var(--ease), color 0.12s var(--ease), background 0.12s var(--ease);
 }
-.drag-handle:active { cursor: grabbing; }
+.list.reordering .drag-handle,
 .item:hover .drag-handle,
 .item.on .drag-handle,
 .drag-handle:focus-visible {
@@ -304,6 +314,9 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 .drag-handle:hover {
   color: var(--t2);
   background: var(--hover);
+}
+.drag-handle:active {
+  cursor: grabbing;
 }
 .rename-input {
   width: 100%;

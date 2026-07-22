@@ -1,11 +1,4 @@
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type DragEvent as ReactDragEvent,
-} from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api, EngineInfo, ProfileSummary, CacheReport, formatBytes } from "./lib/api";
 
@@ -63,8 +56,14 @@ export default function App() {
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const renameInputRef = useRef<HTMLInputElement | null>(null);
-  const dragName = useRef<string | null>(null);
-  const [dragOver, setDragOver] = useState<string | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const [draggingName, setDraggingName] = useState<string | null>(null);
+  const [dropIndex, setDropIndex] = useState<number | null>(null);
+  const dragFromIndex = useRef<number>(-1);
+  const dropIndexRef = useRef<number | null>(null);
+  const profilesRef = useRef(profiles);
+  profilesRef.current = profiles;
+  dropIndexRef.current = dropIndex;
 
   const engine = useMemo(
     () => engines.find((e) => e.key === engineKey) ?? engines[0],
@@ -380,55 +379,82 @@ export default function App() {
     }
   }
 
-  function onDragStartItem(name: string, e: ReactDragEvent) {
-    dragName.current = name;
-    e.dataTransfer.effectAllowed = "move";
-    try {
-      e.dataTransfer.setData("text/plain", name);
-      e.dataTransfer.setData("application/x-profile-name", name);
-    } catch {
-      /* some webviews are picky about custom types */
-    }
-    // Dim the source row while dragging
-    if (e.currentTarget instanceof HTMLElement) {
-      const row = e.currentTarget.closest(".item") as HTMLElement | null;
-      if (row) row.classList.add("dragging");
-    }
-  }
-
-  function onDragOverItem(name: string, e: ReactDragEvent) {
+  /** Pointer-based reorder — HTML5 DnD shows a red "no" cursor in WebView2. */
+  function beginReorder(name: string, index: number, e: ReactPointerEvent) {
+    if (renaming) return;
     e.preventDefault();
     e.stopPropagation();
-    e.dataTransfer.dropEffect = "move";
-    if (dragOver !== name) setDragOver(name);
+    dragFromIndex.current = index;
+    dropIndexRef.current = index;
+    setDraggingName(name);
+    setDropIndex(index);
+    if (engine) selectedByEngine.current[engine.key] = name;
+    setSelected(name);
   }
 
-  async function onDropItem(targetName: string, e: ReactDragEvent) {
-    e.preventDefault();
-    e.stopPropagation();
-    let from = dragName.current;
-    if (!from) {
-      try {
-        from =
-          e.dataTransfer.getData("application/x-profile-name") ||
-          e.dataTransfer.getData("text/plain") ||
-          null;
-      } catch {
-        from = null;
+  function indexFromPointerY(clientY: number): number {
+    const root = listRef.current;
+    if (!root) return 0;
+    const rows = Array.from(root.querySelectorAll<HTMLElement>(".item[data-name]"));
+    if (rows.length === 0) return 0;
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i].getBoundingClientRect();
+      const mid = r.top + r.height / 2;
+      if (clientY < mid) return i;
+    }
+    return rows.length - 1;
+  }
+
+  useEffect(() => {
+    if (!draggingName) return;
+    const onMove = (e: PointerEvent) => {
+      const idx = indexFromPointerY(e.clientY);
+      dropIndexRef.current = idx;
+      setDropIndex(idx);
+    };
+    const onUp = () => {
+      const from = dragFromIndex.current;
+      const to = dropIndexRef.current;
+      const list = [...profilesRef.current];
+      const eng = engine;
+      setDraggingName(null);
+      setDropIndex(null);
+      dropIndexRef.current = null;
+      dragFromIndex.current = -1;
+      if (!eng || from < 0 || to == null || from === to || from >= list.length) return;
+      const [item] = list.splice(from, 1);
+      // When dragging down, after removal the target slot is still `to` (item at old to moves up)
+      // When dragging up, insert at `to`
+      let insertAt = to;
+      if (from < to) {
+        // removed earlier index; insertAt already points to desired final index after splice?
+        // Example: [0,1,2], from=0 to=2 → after remove [1,2], want [1,2,0] → insertAt=2
+        insertAt = to;
       }
-    }
-    dragName.current = null;
-    setDragOver(null);
-    document.querySelectorAll(".item.dragging").forEach((el) => el.classList.remove("dragging"));
-    if (!from || from === targetName) return;
-    const list = [...profiles];
-    const fi = list.findIndex((p) => p.name === from);
-    const ti = list.findIndex((p) => p.name === targetName);
-    if (fi < 0 || ti < 0) return;
-    const [item] = list.splice(fi, 1);
-    list.splice(ti, 0, item);
-    await persistOrder(list);
-  }
+      insertAt = Math.max(0, Math.min(insertAt, list.length));
+      list.splice(insertAt, 0, item);
+      void (async () => {
+        setProfiles(list);
+        try {
+          await api.setProfileOrder(
+            eng.key,
+            list.map((p) => p.name)
+          );
+        } catch (err) {
+          flash("error", String(err));
+          await refresh(selectedByEngine.current[eng.key] ?? null);
+        }
+      })();
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+  }, [draggingName, engine, flash, refresh]);
 
   async function onSaveConfig() {
     if (!engine || !selected) return;
@@ -738,28 +764,25 @@ export default function App() {
         </div>
 
 <div
-          className="list"
-          onDragOver={(e) => {
-            // keep drop allowed over the list itself
-            if (dragName.current) {
-              e.preventDefault();
-              e.dataTransfer.dropEffect = "move";
-            }
-          }}
+          ref={listRef}
+          className={`list${draggingName ? " reordering" : ""}`}
         >
-          {profiles.map((p) => (
+          {profiles.map((p, index) => (
             <div
               key={p.name}
-              className={`item ${selected === p.name ? "on" : ""}${
-                dragOver === p.name ? " drop-target" : ""
-              }`}
-              onDragOver={(e) => onDragOverItem(p.name, e)}
-              onDragLeave={() => {
-                if (dragOver === p.name) setDragOver(null);
-              }}
-              onDrop={(e) => void onDropItem(p.name, e)}
+              data-name={p.name}
+              className={[
+                "item",
+                selected === p.name ? "on" : "",
+                draggingName === p.name ? "dragging" : "",
+                dropIndex === index && draggingName && draggingName !== p.name
+                  ? "drop-target"
+                  : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
               onClick={() => {
-                if (renaming) return;
+                if (renaming || draggingName) return;
                 selectedByEngine.current[engine.key] = p.name;
                 setSelected(p.name);
               }}
@@ -788,17 +811,8 @@ export default function App() {
                 className="drag-handle"
                 title="Drag to reorder"
                 aria-label={`Reorder ${p.name}`}
-                draggable={renaming !== p.name}
-                onDragStart={(e) => onDragStartItem(p.name, e)}
-                onDragEnd={() => {
-                  dragName.current = null;
-                  setDragOver(null);
-                  document
-                    .querySelectorAll(".item.dragging")
-                    .forEach((el) => el.classList.remove("dragging"));
-                }}
+                onPointerDown={(e) => beginReorder(p.name, index, e)}
                 onClick={(e) => e.stopPropagation()}
-                onMouseDown={(e) => e.stopPropagation()}
               >
                 <svg width="10" height="16" viewBox="0 0 10 16" fill="currentColor" aria-hidden>
                   <circle cx="3" cy="3" r="1.2" />
