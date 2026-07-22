@@ -383,20 +383,43 @@ export default function App() {
   function onDragStartItem(name: string, e: ReactDragEvent) {
     dragName.current = name;
     e.dataTransfer.effectAllowed = "move";
-    e.dataTransfer.setData("text/plain", name);
+    try {
+      e.dataTransfer.setData("text/plain", name);
+      e.dataTransfer.setData("application/x-profile-name", name);
+    } catch {
+      /* some webviews are picky about custom types */
+    }
+    // Dim the source row while dragging
+    if (e.currentTarget instanceof HTMLElement) {
+      const row = e.currentTarget.closest(".item") as HTMLElement | null;
+      if (row) row.classList.add("dragging");
+    }
   }
 
   function onDragOverItem(name: string, e: ReactDragEvent) {
     e.preventDefault();
+    e.stopPropagation();
     e.dataTransfer.dropEffect = "move";
     if (dragOver !== name) setDragOver(name);
   }
 
   async function onDropItem(targetName: string, e: ReactDragEvent) {
     e.preventDefault();
-    const from = dragName.current || e.dataTransfer.getData("text/plain");
+    e.stopPropagation();
+    let from = dragName.current;
+    if (!from) {
+      try {
+        from =
+          e.dataTransfer.getData("application/x-profile-name") ||
+          e.dataTransfer.getData("text/plain") ||
+          null;
+      } catch {
+        from = null;
+      }
+    }
     dragName.current = null;
     setDragOver(null);
+    document.querySelectorAll(".item.dragging").forEach((el) => el.classList.remove("dragging"));
     if (!from || from === targetName) return;
     const list = [...profiles];
     const fi = list.findIndex((p) => p.name === from);
@@ -714,24 +737,27 @@ export default function App() {
           <span className="n">{profiles.length}</span>
         </div>
 
-        <div className="list">
+<div
+          className="list"
+          onDragOver={(e) => {
+            // keep drop allowed over the list itself
+            if (dragName.current) {
+              e.preventDefault();
+              e.dataTransfer.dropEffect = "move";
+            }
+          }}
+        >
           {profiles.map((p) => (
             <div
               key={p.name}
               className={`item ${selected === p.name ? "on" : ""}${
                 dragOver === p.name ? " drop-target" : ""
               }`}
-              draggable={renaming !== p.name}
-              onDragStart={(e) => onDragStartItem(p.name, e)}
               onDragOver={(e) => onDragOverItem(p.name, e)}
               onDragLeave={() => {
                 if (dragOver === p.name) setDragOver(null);
               }}
               onDrop={(e) => void onDropItem(p.name, e)}
-              onDragEnd={() => {
-                dragName.current = null;
-                setDragOver(null);
-              }}
               onClick={() => {
                 if (renaming) return;
                 selectedByEngine.current[engine.key] = p.name;
@@ -739,6 +765,7 @@ export default function App() {
               }}
               onDoubleClick={(e) => {
                 e.stopPropagation();
+                if ((e.target as HTMLElement).closest(".drag-handle, .item-actions")) return;
                 startRename(p.name);
               }}
               role="button"
@@ -756,9 +783,32 @@ export default function App() {
                 }
               }}
             >
-              <span className="drag-handle" title="Drag to reorder" aria-hidden>
-                ⋮⋮
-              </span>
+              <button
+                type="button"
+                className="drag-handle"
+                title="Drag to reorder"
+                aria-label={`Reorder ${p.name}`}
+                draggable={renaming !== p.name}
+                onDragStart={(e) => onDragStartItem(p.name, e)}
+                onDragEnd={() => {
+                  dragName.current = null;
+                  setDragOver(null);
+                  document
+                    .querySelectorAll(".item.dragging")
+                    .forEach((el) => el.classList.remove("dragging"));
+                }}
+                onClick={(e) => e.stopPropagation()}
+                onMouseDown={(e) => e.stopPropagation()}
+              >
+                <svg width="10" height="16" viewBox="0 0 10 16" fill="currentColor" aria-hidden>
+                  <circle cx="3" cy="3" r="1.2" />
+                  <circle cx="7" cy="3" r="1.2" />
+                  <circle cx="3" cy="8" r="1.2" />
+                  <circle cx="7" cy="8" r="1.2" />
+                  <circle cx="3" cy="13" r="1.2" />
+                  <circle cx="7" cy="13" r="1.2" />
+                </svg>
+              </button>
               <div className="item-main">
                 {renaming === p.name ? (
                   <input
@@ -791,7 +841,7 @@ export default function App() {
                 {p.isActive && <span className="chip g">In use</span>}
                 <button
                   type="button"
-                  className="icon-del"
+                  className="icon-action"
                   title={`Rename “${p.name}”`}
                   aria-label={`Rename ${p.name}`}
                   onClick={(e) => {
@@ -801,16 +851,17 @@ export default function App() {
                 >
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden>
                     <path
-                      d="M4 20h4l10.5-10.5a1.5 1.5 0 0 0 0-2.12L16.62 5.5a1.5 1.5 0 0 0-2.12 0L4 16v4z"
+                      d="M12 20h9M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"
                       stroke="currentColor"
                       strokeWidth="1.6"
+                      strokeLinecap="round"
                       strokeLinejoin="round"
                     />
                   </svg>
                 </button>
                 <button
                   type="button"
-                  className="icon-del"
+                  className="icon-action danger"
                   title={`Delete “${p.name}”`}
                   aria-label={`Delete ${p.name}`}
                   onClick={(e) => {

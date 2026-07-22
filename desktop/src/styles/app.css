@@ -263,30 +263,64 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 :root[data-theme="dark"] .list { scrollbar-color: rgba(255, 255, 255, 0.16) transparent; }
 :root[data-theme="dark"] .list::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.14); border: 2px solid transparent; background-clip: padding-box; }
 :root[data-theme="dark"] .list::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.24); border: 2px solid transparent; background-clip: padding-box; }
-.item { width: 100%; text-align: left; display: grid; grid-template-columns: 14px minmax(0, 1fr) auto; gap: 6px; align-items: center; padding: 9px 10px; border-radius: 10px; transition: background 0.12s var(--ease), box-shadow 0.12s var(--ease); cursor: grab; }
-.item:active { cursor: grabbing; }
-.item.drop-target { box-shadow: inset 0 0 0 1.5px var(--blue); background: var(--active-bg); }
-.drag-handle {
-  font-size: 10px;
-  line-height: 1;
-  letter-spacing: -1px;
-  color: var(--t4);
+.item {
+  width: 100%;
+  text-align: left;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  gap: 4px;
+  align-items: center;
+  padding: 8px 8px 8px 6px;
+  border-radius: 10px;
+  transition: background 0.12s var(--ease), box-shadow 0.12s var(--ease), opacity 0.12s var(--ease);
+  cursor: pointer;
   user-select: none;
-  opacity: 0.55;
 }
-.item:hover .drag-handle { opacity: 0.9; color: var(--t3); }
+.item.dragging { opacity: 0.45; }
+.item.drop-target {
+  box-shadow: inset 0 2px 0 0 var(--blue);
+  background: var(--active-bg);
+}
+.drag-handle {
+  width: 18px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  padding: 0;
+  border-radius: 6px;
+  color: var(--t4);
+  background: transparent;
+  cursor: grab;
+  opacity: 0;
+  transition: opacity 0.12s var(--ease), color 0.12s var(--ease), background 0.12s var(--ease);
+}
+.drag-handle:active { cursor: grabbing; }
+.item:hover .drag-handle,
+.item.on .drag-handle,
+.drag-handle:focus-visible {
+  opacity: 1;
+}
+.drag-handle:hover {
+  color: var(--t2);
+  background: var(--hover);
+}
 .rename-input {
   width: 100%;
-  height: 26px;
+  height: 22px;
+  margin: 0;
   border: 0;
-  border-radius: 6px;
-  background: var(--lift);
+  border-radius: 4px;
+  background: transparent;
   color: var(--t1);
-  padding: 0 8px;
+  padding: 0 2px;
   font-size: 13.5px;
   font-weight: 600;
+  letter-spacing: -0.015em;
+  line-height: 1.25;
   outline: none;
-  box-shadow: inset 0 0 0 1px var(--hair), 0 0 0 2px color-mix(in srgb, var(--blue) 28%, transparent);
+  box-shadow: 0 1px 0 0 var(--blue);
+  caret-color: var(--blue);
 }
 .item:hover { background: var(--hover); }
 .item.on { background: var(--active-bg); box-shadow: inset 0 0 0 1px var(--active-ring); }
@@ -386,6 +420,7 @@ input[type="text"]:focus { box-shadow: inset 0 0 0 1px var(--hair), 0 0 0 2px co
   gap: 4px;
   flex-shrink: 0;
 }
+.icon-action,
 .icon-del {
   width: 28px;
   height: 28px;
@@ -396,11 +431,19 @@ input[type="text"]:focus { box-shadow: inset 0 0 0 1px var(--hair), 0 0 0 2px co
   opacity: 0;
   transition: opacity 0.12s var(--ease), background 0.12s var(--ease), color 0.12s var(--ease);
 }
+.item:hover .icon-action,
+.item.on .icon-action,
+.icon-action:focus-visible,
 .item:hover .icon-del,
 .item.on .icon-del,
 .icon-del:focus-visible {
   opacity: 1;
 }
+.icon-action:hover {
+  background: var(--hover);
+  color: var(--t1);
+}
+.icon-action.danger:hover,
 .icon-del:hover {
   background: color-mix(in srgb, var(--red) 12%, transparent);
   color: var(--red);
