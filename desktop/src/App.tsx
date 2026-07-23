@@ -1341,8 +1341,8 @@ Provider / base_url / model are in config.toml (Config tab).`}
                   />
                 </div>
                 <div className="hint">
-                  Opens PowerShell with {engine.homeEnv} set only for this profile.
-                  Working directory is remembered for each profile.
+                  Opens with {engine.homeEnv} set for this profile only.
+                  Working directory is remembered per profile.
                 </div>
               </div>
             )}

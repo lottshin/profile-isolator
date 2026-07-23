@@ -77,6 +77,7 @@ pub fn engines() -> Vec<EngineInfo> {
             session_dirs: vec!["sessions".into(), "archived_sessions".into()],
             session_files: vec![
                 "session_index.jsonl".into(),
+                "history.jsonl".into(),
                 "state_5.sqlite".into(),
                 "state_5.sqlite-shm".into(),
                 "state_5.sqlite-wal".into(),
@@ -800,7 +801,7 @@ pub fn copy_profile(
     Ok(dest_safe)
 }
 
-/// Ensure profile has session dir junctions to the shared home. Fast path for empty folders.
+/// Ensure profile has session dir junctions + index/state files linked to shared home.
 fn ensure_sessions_shared(engine: &EngineInfo, profile: &Path) -> Result<(), String> {
     let shared = shared_session_home(engine);
     if same_path_fast(profile, &shared) {
@@ -814,21 +815,19 @@ fn ensure_sessions_shared(engine: &EngineInfo, profile: &Path) -> Result<(), Str
         let target = shared.join(dirname);
         let _ = fs::create_dir_all(&target);
         if is_reparse_point(&local) || local.is_symlink() {
-            // already linked — good enough
             continue;
         }
         if local.exists() {
-            // Real directory (e.g. leftover empty) — remove then link
             if local.is_dir() {
-                // only remove if empty-ish to avoid data loss; else use full enable_shared_sessions
                 let empty = fs::read_dir(&local)
                     .map(|mut d| d.next().is_none())
                     .unwrap_or(false);
                 if empty {
                     let _ = fs::remove_dir(&local);
                 } else {
-                    // has content — fall back to full share (merge)
-                    return enable_shared_sessions_for_path(engine, profile).map(|_| ());
+                    // has content — full share (merge) then continue files
+                    let _ = enable_shared_sessions_for_path(engine, profile);
+                    break;
                 }
             } else {
                 let _ = fs::remove_file(&local);
@@ -836,10 +835,95 @@ fn ensure_sessions_shared(engine: &EngineInfo, profile: &Path) -> Result<(), Str
         }
         need.push((local, target));
     }
-    if need.is_empty() {
-        return Ok(());
+    if !need.is_empty() {
+        create_junctions_batch(&need)?;
     }
-    create_junctions_batch(&need)
+
+    // Codex stores the resume *index* outside sessions/ (session_index.jsonl, history, sqlite).
+    // Without linking these, resume shows "No sessions yet" even when sessions/ is shared.
+    link_session_index_files(engine, profile, &shared)?;
+    Ok(())
+}
+
+/// Link/copy session index + state files from shared home into the profile root.
+fn link_session_index_files(
+    engine: &EngineInfo,
+    profile: &Path,
+    shared: &Path,
+) -> Result<(), String> {
+    // Always try these known names even if engine.session_files is incomplete
+    let mut names: Vec<String> = engine.session_files.clone();
+    for extra in [
+        "session_index.jsonl",
+        "history.jsonl",
+        "state_5.sqlite",
+        "state_5.sqlite-shm",
+        "state_5.sqlite-wal",
+        ".codex-global-state.json",
+    ] {
+        if !names.iter().any(|n| n == extra) {
+            names.push(extra.to_string());
+        }
+    }
+
+    for fname in names {
+        let local = profile.join(&fname);
+        let target = shared.join(&fname);
+
+        // Prefer shared as source of truth when both exist as real files:
+        // if local is a small/empty leftover from copy and shared is larger, replace local.
+        if is_reparse_point(&local) || local.is_symlink() {
+            continue; // already linked
+        }
+
+        if !target.exists() {
+            // nothing to share yet
+            if local.is_file() && fname.ends_with(".jsonl") {
+                // promote local index into shared so other profiles can see it
+                if let Some(parent) = target.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                let _ = fs::copy(&local, &target);
+            }
+            continue;
+        }
+
+        // Shared has the file
+        if local.exists() {
+            let local_sz = fs::metadata(&local).map(|m| m.len()).unwrap_or(0);
+            let shared_sz = fs::metadata(&target).map(|m| m.len()).unwrap_or(0);
+            // If local is clearly a stub from copy (much smaller), drop it and link shared
+            let should_replace = local_sz < shared_sz
+                || (fname.ends_with(".jsonl") && local_sz < 1024 && shared_sz > local_sz)
+                || (fname.contains("sqlite") && local_sz < shared_sz / 2);
+            if should_replace {
+                let _ = fs::remove_file(&local);
+            } else {
+                // keep local (may have newer private state) — still try hardlink if identical size
+                if local_sz == shared_sz {
+                    continue;
+                }
+                continue;
+            }
+        }
+
+        // Create hardlink (same volume) or hard-fail to copy for index files only
+        if let Err(e) = fs::hard_link(&target, &local) {
+            // hardlink may fail across volumes — copy then
+            if fname.contains("sqlite-shm") || fname.contains("sqlite-wal") {
+                // skip volatile sidecars if hardlink fails
+                let _ = e;
+                continue;
+            }
+            fs::copy(&target, &local).map_err(|err| {
+                format!(
+                    "link {} failed (hardlink: {e}; copy: {err})",
+                    fname
+                )
+            })?;
+        }
+    }
+    Ok(())
 }
 
 fn enable_shared_sessions_for_path(engine: &EngineInfo, profile: &Path) -> Result<serde_json::Value, String> {
