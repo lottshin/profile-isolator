@@ -989,6 +989,236 @@ fn same_path_fast(a: &Path, b: &Path) -> bool {
     same_path(a, b)
 }
 
+// ---------------------------------------------------------------------------
+// Project session view — show only sessions for the Launch working directory
+// ---------------------------------------------------------------------------
+
+fn normalize_cwd_key(path: &str) -> String {
+    let s = strip_verbatim_prefix(path.trim());
+    let mut s = s.replace('/', "\\");
+    while s.ends_with('\\') && s.len() > 3 {
+        s.pop();
+    }
+    // Windows paths are case-insensitive
+    s.to_ascii_lowercase()
+}
+
+/// Read cwd + session id from the first jsonl line if it is session_meta.
+fn read_session_meta_head(path: &Path) -> Option<(String, String)> {
+    let file = fs::File::open(path).ok()?;
+    use std::io::BufRead;
+    let mut reader = io::BufReader::new(file);
+    let mut line = String::new();
+    reader.read_line(&mut line).ok()?;
+    let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    if v.get("type").and_then(|t| t.as_str()) != Some("session_meta") {
+        return None;
+    }
+    let payload = v.get("payload")?;
+    let cwd = payload.get("cwd").and_then(|c| c.as_str())?.to_string();
+    let id = payload
+        .get("session_id")
+        .or_else(|| payload.get("id"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    if cwd.is_empty() {
+        return None;
+    }
+    Some((cwd, id))
+}
+
+fn wipe_path(path: &Path) {
+    if !path.exists() && !is_reparse_point(path) {
+        return;
+    }
+    if path.is_dir() || is_reparse_point(path) {
+        let _ = fs::remove_dir_all(path);
+        let _ = fs::remove_dir(path);
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/C", "rmdir", "/S", "/Q", &path.display().to_string()]);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let _ = cmd.status();
+    } else {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn hardlink_or_copy(src: &Path, dst: &Path) -> Result<(), String> {
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    if dst.exists() {
+        let _ = fs::remove_file(dst);
+    }
+    match fs::hard_link(src, dst) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            fs::copy(src, dst).map_err(|e| format!("copy {}: {e}", src.display()))?;
+            Ok(())
+        }
+    }
+}
+
+/// Build a slim CODEX_HOME session tree for one project cwd.
+/// Returns number of session files linked into the view.
+fn apply_project_session_view(
+    engine: &EngineInfo,
+    profile: &Path,
+    work_dir: &str,
+) -> Result<usize, String> {
+    if engine.key != "codex" {
+        return ensure_sessions_shared(engine, profile).map(|_| 0);
+    }
+    let shared = shared_session_home(engine);
+    let shared_sessions = shared.join("sessions");
+    if !shared_sessions.is_dir() {
+        // No global library — fall back to normal share setup
+        ensure_sessions_shared(engine, profile)?;
+        return Ok(0);
+    }
+
+    let want = normalize_cwd_key(work_dir);
+    let mut matched: Vec<(PathBuf, String, String)> = Vec::new(); // abs path, rel posix-ish, id
+
+    for entry in WalkDir::new(&shared_sessions)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let p = entry.path();
+        if !p.is_file() {
+            continue;
+        }
+        if p.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Some((cwd, id)) = read_session_meta_head(p) else {
+            continue;
+        };
+        if normalize_cwd_key(&cwd) != want {
+            continue;
+        }
+        let rel = p
+            .strip_prefix(&shared_sessions)
+            .map(|r| r.to_path_buf())
+            .unwrap_or_else(|_| PathBuf::from(p.file_name().unwrap_or_default()));
+        let sid = if id.is_empty() {
+            p.file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default()
+        } else {
+            id
+        };
+        matched.push((p.to_path_buf(), rel.to_string_lossy().replace('/', "\\"), sid));
+    }
+
+    // Replace profile sessions/ with a real directory (not full-library junction)
+    let local_sessions = profile.join("sessions");
+    wipe_path(&local_sessions);
+    fs::create_dir_all(&local_sessions).map_err(|e| e.to_string())?;
+
+    // archived_sessions: empty real dir (don't pull archive into hot view)
+    let local_arch = profile.join("archived_sessions");
+    if is_reparse_point(&local_arch) || local_arch.is_symlink() {
+        wipe_path(&local_arch);
+    }
+    let _ = fs::create_dir_all(&local_arch);
+
+    for (src, rel, _) in &matched {
+        let dst = local_sessions.join(rel);
+        hardlink_or_copy(src, &dst)?;
+    }
+
+    // Filtered session_index.jsonl
+    let shared_index = shared.join("session_index.jsonl");
+    let local_index = profile.join("session_index.jsonl");
+    let id_set: HashSet<String> = matched.iter().map(|(_, _, id)| id.clone()).collect();
+    if shared_index.is_file() && !id_set.is_empty() {
+        let raw = fs::read_to_string(&shared_index).unwrap_or_default();
+        let mut out = String::new();
+        for line in raw.lines() {
+            let t = line.trim();
+            if t.is_empty() {
+                continue;
+            }
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(t) {
+                if let Some(id) = v.get("id").and_then(|x| x.as_str()) {
+                    if id_set.contains(id) {
+                        out.push_str(t);
+                        out.push('\n');
+                    }
+                }
+            }
+        }
+        // If index had no matching ids, synthesize minimal entries
+        if out.is_empty() {
+            for (_, _, id) in &matched {
+                if id.is_empty() {
+                    continue;
+                }
+                out.push_str(&format!(
+                    "{{\"id\":\"{id}\",\"thread_name\":\"\",\"updated_at\":\"\"}}\n"
+                ));
+            }
+        }
+        if local_index.exists() {
+            let _ = fs::remove_file(&local_index);
+        }
+        write_text(&local_index, &out)?;
+    } else if !matched.is_empty() {
+        let mut out = String::new();
+        for (_, _, id) in &matched {
+            if id.is_empty() {
+                continue;
+            }
+            out.push_str(&format!(
+                "{{\"id\":\"{id}\",\"thread_name\":\"\",\"updated_at\":\"\"}}\n"
+            ));
+        }
+        if local_index.exists() {
+            let _ = fs::remove_file(&local_index);
+        }
+        write_text(&local_index, &out)?;
+    } else {
+        // No sessions for this cwd — empty index
+        if local_index.exists() {
+            let _ = fs::remove_file(&local_index);
+        }
+        write_text(&local_index, "")?;
+    }
+
+    // history.jsonl: keep full shared hardlink (small relative to sessions); filter optional later
+    for fname in ["history.jsonl", "state_5.sqlite", "state_5.sqlite-shm", "state_5.sqlite-wal"] {
+        let src = shared.join(fname);
+        let dst = profile.join(fname);
+        if !src.exists() {
+            continue;
+        }
+        if is_reparse_point(&dst) || dst.is_symlink() {
+            continue;
+        }
+        if dst.exists() {
+            let _ = fs::remove_file(&dst);
+        }
+        let _ = hardlink_or_copy(&src, &dst);
+    }
+
+    // Marker for debugging / future cache invalidation
+    let marker = format!(
+        "{{\n  \"mode\": \"project-view\",\n  \"cwd\": {},\n  \"sessions\": {}\n}}\n",
+        serde_json::to_string(work_dir).unwrap_or_else(|_| "\"\"".into()),
+        matched.len()
+    );
+    let _ = write_text(&profile.join(".session-view.json"), &marker);
+
+    Ok(matched.len())
+}
+
 fn unique_copy_name(root: &Path, base: &str) -> String {
     let candidate = format!("{base}-copy");
     if !root.join(&candidate).exists() {
@@ -1534,11 +1764,19 @@ pub fn launch_profile(
     if !path.is_dir() {
         return Err(format!("Profile '{name}' not found"));
     }
-    // Always ensure session junctions before Launch (copy/create may have skipped)
-    let _ = ensure_sessions_shared(&engine, &path);
 
     let wd = strip_verbatim_prefix(&resolve_work_dir(work_dir));
-    // Skip canonicalize on Launch — it can stall on junctions/network; absolute path is enough
+    // Codex: prefer a per-project session view when cwd is set (faster /resume, correct list).
+    // Empty cwd → full shared library (legacy behaviour).
+    if engine.key == "codex" && !wd.trim().is_empty() && Path::new(wd.trim()).is_dir() {
+        let n = apply_project_session_view(&engine, &path, wd.trim())?;
+        // n == 0 still OK — empty list is correct for a brand-new folder
+        let _ = n;
+    } else {
+        let _ = ensure_sessions_shared(&engine, &path);
+    }
+
+    // Skip canonicalize on Launch — absolute path is enough
     let home = strip_verbatim_prefix(&path.display().to_string());
     let env_var = &engine.home_env;
 
