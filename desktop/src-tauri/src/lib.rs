@@ -116,7 +116,7 @@ fn cmd_launch(
     work_dir: Option<String>,
     run_cli: bool,
     cli_args: Vec<String>,
-) -> Result<(), String> {
+) -> Result<serde_json::Value, String> {
     launch_profile(&engine, &name, work_dir, run_cli, cli_args)
 }
 

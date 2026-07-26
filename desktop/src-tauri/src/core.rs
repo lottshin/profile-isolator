@@ -1848,22 +1848,78 @@ pub fn launch_profile(
     work_dir: Option<String>,
     run_cli: bool,
     cli_args: Vec<String>,
-) -> Result<(), String> {
+) -> Result<serde_json::Value, String> {
     let engine = get_engine(engine_key)?;
     let path = profile_path(&engine, name)?;
     if !path.is_dir() {
-        return Err(format!("Profile '{name}' not found"));
+        return Err(format!(
+            "Profile '{name}' not found.\nExpected folder:\n{}",
+            path.display()
+        ));
     }
 
-    let wd = strip_verbatim_prefix(&resolve_work_dir(work_dir));
+    let raw_wd = work_dir.as_ref().map(|s| s.trim().to_string()).unwrap_or_default();
+    let mut warnings: Vec<String> = Vec::new();
+    let mut session_mode = "full-share".to_string();
+    let mut session_count: Option<usize> = None;
+    let mut session_cached = false;
+
+    // Validate optional working directory early (clear message for the UI)
+    let wd = if raw_wd.is_empty() {
+        strip_verbatim_prefix(&resolve_work_dir(None))
+    } else {
+        let p = PathBuf::from(&raw_wd);
+        if !p.is_dir() {
+            return Err(format!(
+                "Working directory does not exist or is not a folder:\n{raw_wd}\n\nPick a valid project path, or clear the field."
+            ));
+        }
+        strip_verbatim_prefix(&raw_wd)
+    };
+
     // Codex: prefer a per-project session view when cwd is set (faster /resume, correct list).
     // Empty cwd → full shared library (legacy behaviour).
-    if engine.key == "codex" && !wd.trim().is_empty() && Path::new(wd.trim()).is_dir() {
-        let n = apply_project_session_view(&engine, &path, wd.trim())?;
-        // n == 0 still OK — empty list is correct for a brand-new folder
-        let _ = n;
+    if engine.key == "codex" && !raw_wd.is_empty() {
+        // Detect cache hit via marker before rebuild
+        let marker_path = path.join(".session-view.json");
+        let before_fp = fs::read_to_string(&marker_path).ok();
+        match apply_project_session_view(&engine, &path, wd.trim()) {
+            Ok(n) => {
+                session_mode = "project-view".into();
+                session_count = Some(n);
+                // If marker fingerprint unchanged and count same, treat as cache (apply_project already skipped work)
+                if let (Some(before), Ok(after)) = (
+                    before_fp.as_ref(),
+                    fs::read_to_string(&marker_path),
+                ) {
+                    if before == &after {
+                        session_cached = true;
+                    }
+                }
+                if n == 0 {
+                    warnings.push(format!(
+                        "No Codex sessions found for this working directory yet:\n{wd}"
+                    ));
+                }
+            }
+            Err(e) => {
+                // Don't block launch — fall back to full share, but report it
+                warnings.push(format!("Project session view failed, using full library: {e}"));
+                let _ = ensure_sessions_shared(&engine, &path);
+                session_mode = "full-share-fallback".into();
+            }
+        }
     } else {
-        let _ = ensure_sessions_shared(&engine, &path);
+        match ensure_sessions_shared(&engine, &path) {
+            Ok(()) => {}
+            Err(e) => warnings.push(format!("Session share setup warning: {e}")),
+        }
+        if engine.key == "codex" && raw_wd.is_empty() {
+            warnings.push(
+                "Working directory is empty — using full shared session library (slower /resume)."
+                    .into(),
+            );
+        }
     }
 
     // Skip canonicalize on Launch — absolute path is enough
@@ -1873,28 +1929,40 @@ pub fn launch_profile(
     if run_cli {
         let cli = find_cli(&engine).ok_or_else(|| {
             format!(
-                "{} not found. Install it or add it to PATH.",
-                engine.command_names[0]
+                "{} not found on PATH.\n\nInstall the CLI or add it to PATH, then try Launch again.\nLooked for: {}",
+                engine.command_names[0],
+                engine.command_names.join(", ")
             )
         })?;
-        return spawn_cli_single_console(&cli, &cli_args, env_var, &home, &wd, &engine.key, name);
+        spawn_cli_single_console(&cli, &cli_args, env_var, &home, &wd, &engine.key, name)?;
+    } else {
+        // Terminal-only: interactive PowerShell with env pre-set
+        let header = format!(
+            "$env:{env_var} = '{}'\nSet-Location -LiteralPath '{}'\nWrite-Host ('[{}] profile = {}') -ForegroundColor Green\nWrite-Host ('[{}] {env_var} = ' + $env:{env_var}) -ForegroundColor DarkGray\nWrite-Host 'Type: {}' -ForegroundColor DarkGray\n",
+            ps_quote(&home),
+            ps_quote(&wd),
+            engine.key,
+            ps_quote(name),
+            engine.key,
+            engine.command_names[0]
+        );
+        Command::new("powershell.exe")
+            .args(["-NoLogo", "-NoExit", "-Command", &header])
+            .spawn()
+            .map_err(|e| format!("Failed to open PowerShell: {e}"))?;
     }
 
-    // Terminal-only: interactive PowerShell with env pre-set
-    let header = format!(
-        "$env:{env_var} = '{}'\nSet-Location -LiteralPath '{}'\nWrite-Host ('[{}] profile = {}') -ForegroundColor Green\nWrite-Host ('[{}] {env_var} = ' + $env:{env_var}) -ForegroundColor DarkGray\nWrite-Host 'Type: {}' -ForegroundColor DarkGray\n",
-        ps_quote(&home),
-        ps_quote(&wd),
-        engine.key,
-        ps_quote(name),
-        engine.key,
-        engine.command_names[0]
-    );
-    Command::new("powershell.exe")
-        .args(["-NoLogo", "-NoExit", "-Command", &header])
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    Ok(serde_json::json!({
+        "ok": true,
+        "engine": engine.key,
+        "profile": name,
+        "workDir": wd,
+        "runCli": run_cli,
+        "sessionMode": session_mode,
+        "sessionCount": session_count,
+        "sessionCached": session_cached,
+        "warnings": warnings,
+    }))
 }
 
 /// One console window: env + cwd via process APIs; CLI args as separate argv (no nested-quote breakage).

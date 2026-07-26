@@ -70,6 +70,18 @@ export type AppAbout = {
   platform: string;
 };
 
+export type LaunchResult = {
+  ok: boolean;
+  engine: string;
+  profile: string;
+  workDir: string;
+  runCli: boolean;
+  sessionMode: string;
+  sessionCount?: number | null;
+  sessionCached?: boolean;
+  warnings?: string[];
+};
+
 async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const { invoke: inv } = await import("@tauri-apps/api/core");
   return inv<T>(cmd, args);
@@ -115,7 +127,8 @@ export const api = {
     workDir: string | null,
     runCli: boolean,
     cliArgs: string[]
-  ) => invoke<void>("cmd_launch", { engine, name, workDir, runCli, cliArgs }),
+  ) =>
+    invoke<LaunchResult>("cmd_launch", { engine, name, workDir, runCli, cliArgs }),
   openPath: (path: string) => invoke<void>("cmd_open_path", { path }),
   /** Prefer native dialog; falls back only if plugin fails. */
   pickFolder: async () => {

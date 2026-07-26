@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { api, EngineInfo, ProfileSummary, CacheReport, AppAbout, formatBytes } from "./lib/api";
+import { api, EngineInfo, ProfileSummary, CacheReport, AppAbout, LaunchResult, formatBytes } from "./lib/api";
 
 type Tab = "config" | "auth" | "launch" | "sessions";
 type Toast = { kind: "ok" | "error" | "info"; text: string } | null;
@@ -64,6 +64,10 @@ export default function App() {
   const [doctorText, setDoctorText] = useState("");
   const [aboutOpen, setAboutOpen] = useState(false);
   const [about, setAbout] = useState<AppAbout | null>(null);
+  const [launchBusy, setLaunchBusy] = useState(false);
+  const [launchStatus, setLaunchStatus] = useState<string | null>(null);
+  const [launchError, setLaunchError] = useState<string | null>(null);
+  const [workdirInvalid, setWorkdirInvalid] = useState(false);
   const [busy, setBusy] = useState(false);
   const [cacheOpen, setCacheOpen] = useState(false);
   const [cacheReport, setCacheReport] = useState<CacheReport | null>(null);
@@ -100,10 +104,41 @@ export default function App() {
     [profiles, selected]
   );
 
-  const flash = useCallback((kind: NonNullable<Toast>["kind"], text: string) => {
+  const flash = useCallback((kind: NonNullable<Toast>["kind"], text: string, ms = 2800) => {
     setToast({ kind, text });
-    window.setTimeout(() => setToast(null), 2500);
+    window.setTimeout(() => setToast(null), ms);
   }, []);
+
+  function formatInvokeError(e: unknown): string {
+    if (e == null) return "Unknown error";
+    if (typeof e === "string") return e;
+    if (typeof e === "object") {
+      const o = e as Record<string, unknown>;
+      if (typeof o.message === "string") return o.message;
+      try {
+        return JSON.stringify(e);
+      } catch {
+        return String(e);
+      }
+    }
+    return String(e);
+  }
+
+  function summarizeLaunch(r: LaunchResult): string {
+    const parts: string[] = [];
+    if (r.runCli) parts.push("Launched");
+    else parts.push("Terminal opened");
+    if (r.sessionMode === "project-view") {
+      const n = r.sessionCount ?? 0;
+      if (r.sessionCached) parts.push(`sessions cached (${n})`);
+      else parts.push(`project sessions ${n}`);
+    } else if (r.sessionMode === "full-share-fallback") {
+      parts.push("full library (view fallback)");
+    } else if (r.sessionMode === "full-share") {
+      parts.push("full session library");
+    }
+    return parts.join(" · ");
+  }
 
   // Remember last selection per engine so Codex/Claude don't share the same name.
   const selectedByEngine = useRef<Record<string, string | null>>({});
@@ -590,15 +625,47 @@ export default function App() {
   async function onLaunch(runCli: boolean) {
     if (!engine || !selected) return;
     const cliArgs = args.trim() ? args.trim().split(/\s+/) : [];
+    const wd = workDir.trim();
     // Remember cwd for this profile
     saveWorkDir(engine.key, selected, workDir);
-    // Immediate feedback — spawn is fire-and-forget after this returns
+    setLaunchError(null);
+    setLaunchBusy(true);
+    if (engine.key === "codex" && wd) {
+      setLaunchStatus("Preparing project sessions (may take a while the first time)…");
+    } else if (engine.key === "codex") {
+      setLaunchStatus("Preparing shared sessions…");
+    } else {
+      setLaunchStatus(runCli ? "Starting…" : "Opening terminal…");
+    }
     flash("info", runCli ? "Starting…" : "Opening terminal…");
     try {
-      await api.launch(engine.key, selected, workDir.trim() || null, runCli, cliArgs);
-      flash("ok", runCli ? "Launched" : "Terminal opened");
+      const result = await api.launch(
+        engine.key,
+        selected,
+        wd || null,
+        runCli,
+        cliArgs
+      );
+      const summary = summarizeLaunch(result);
+      setLaunchStatus(summary);
+      if (result.warnings && result.warnings.length > 0) {
+        const w = result.warnings.join("\n\n");
+        setLaunchError(w);
+        flash("info", summary, 3500);
+      } else {
+        flash("ok", summary);
+      }
+      // Clear busy line after a moment if no error panel needed
+      if (!result.warnings?.length) {
+        window.setTimeout(() => setLaunchStatus(null), 4000);
+      }
     } catch (e) {
-      flash("error", String(e));
+      const msg = formatInvokeError(e);
+      setLaunchError(msg);
+      setLaunchStatus(null);
+      flash("error", msg.split("\n")[0] || "Launch failed", 5000);
+    } finally {
+      setLaunchBusy(false);
     }
   }
 
@@ -1072,9 +1139,10 @@ export default function App() {
                 <button
                   className="btn primary"
                   onClick={() => onLaunch(true)}
+                  disabled={launchBusy || busy}
                   title="Start CLI with this profile"
                 >
-                  Launch
+                  {launchBusy ? "Launching…" : "Launch"}
                 </button>
                 <button
                   type="button"
@@ -1343,17 +1411,23 @@ Provider / base_url / model are in config.toml (Config tab).`}
                     <input
                       type="text"
                       value={workDir}
+                      className={workdirInvalid ? "invalid" : undefined}
                       onChange={(e) => {
                         const v = e.target.value;
                         setWorkDir(v);
+                        setWorkdirInvalid(false);
+                        setLaunchError(null);
                         if (engine && selected) saveWorkDir(engine.key, selected, v);
                       }}
                       placeholder="Project folder (remembered per profile)"
                     />
-                    <button className="btn" onClick={onBrowse}>
+                    <button className="btn" onClick={onBrowse} disabled={launchBusy}>
                       Browse
                     </button>
                   </div>
+                  {workdirInvalid && (
+                    <div className="field-error">This path is not a valid folder.</div>
+                  )}
                 </div>
                 <div className="field">
                   <span>Extra arguments</span>
@@ -1362,11 +1436,34 @@ Provider / base_url / model are in config.toml (Config tab).`}
                     value={args}
                     onChange={(e) => setArgs(e.target.value)}
                     placeholder="e.g. resume"
+                    disabled={launchBusy}
                   />
                 </div>
+                {launchStatus && (
+                  <div className={`launch-status${launchBusy ? " busy" : ""}`}>
+                    {launchBusy && <span className="launch-spin" aria-hidden />}
+                    <span>{launchStatus}</span>
+                  </div>
+                )}
+                {launchError && (
+                  <div className="launch-error" role="alert">
+                    <div className="launch-error-title">Launch note</div>
+                    <pre className="launch-error-body">{launchError}</pre>
+                    <button
+                      type="button"
+                      className="btn sm"
+                      onClick={() => setLaunchError(null)}
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                )}
                 <div className="hint">
                   Opens with {engine.homeEnv} set for this profile only.
                   Working directory is remembered per profile.
+                  {engine.key === "codex"
+                    ? " With a project folder set, sessions are filtered for faster /resume."
+                    : ""}
                 </div>
               </div>
             )}
