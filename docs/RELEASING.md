@@ -1,6 +1,6 @@
-# 发布 Windows 便携版（CI）
+# 发布 Windows 包（CI）
 
-仓库已配置 GitHub Actions：`.github/workflows/release-windows.yml`。
+仓库：`.github/workflows/release-windows.yml`。
 
 ## 一键发版（推荐）
 
@@ -10,37 +10,51 @@
 cd D:\New_god\tool\codex-profile
 git checkout main
 git pull
-# 如有需要先改版本号：desktop/package.json、desktop/src-tauri/tauri.conf.json、Cargo.toml
-git tag v1.0.4
-git push origin v1.0.4
+# 改版本号：desktop/package.json、desktop/src-tauri/tauri.conf.json、Cargo.toml
+git tag v1.0.6
+git push origin v1.0.6
 ```
 
-Actions 会在 `windows-latest` 上：
+Actions（`windows-latest`）会：
 
-1. `npm ci` + `tauri build --no-bundle`
-2. 打包 `ProfileIsolator.exe` 与 `ProfileIsolator-windows-portable.zip`
-3. 创建/更新 GitHub Release，并上传上述文件
+1. `npm ci` + `tauri build --bundles nsis`（便携 exe + **NSIS 安装包**）
+2. 打包：
+   - `ProfileIsolator.exe` — 免安装
+   - `ProfileIsolator-windows-portable.zip` — exe + 说明
+   - `ProfileIsolator-setup.exe` — 安装包（开始菜单 / 卸载）
+   - `SHA256SUMS.txt` — 校验和
+3. 创建/更新 GitHub Release，**Release 正文含 SHA256**
 
 ## 仅构建、不发版
 
-GitHub → Actions → **Release Windows** → **Run workflow**  
-（可不填 tag；产物在 Artifact `ProfileIsolator-windows-portable`）
+GitHub → Actions → **Release Windows** → **Run workflow**
 
-若要挂到已有 Release，在 `tag` 填入如 `v1.0.3` 再运行。
+- 不填 tag → 产物在 Artifact `ProfileIsolator-windows`
+- 填已有 tag → 上传到该 Release
+- `with_installer` 可关（只打便携包，更快）
+
+## 校验下载
+
+```powershell
+Get-FileHash .\ProfileIsolator.exe -Algorithm SHA256
+# 与 Release 中 SHA256SUMS.txt 或说明里的哈希对照（不区分大小写）
+```
 
 ## 本地等价命令
 
 ```powershell
 cd desktop
 npm ci
+# 便携 exe only
 npm run tauri build -- --no-bundle
-# 输出：src-tauri/target/release/ai_cli_profile_isolator.exe
+# 含 NSIS 安装包
+npm run tauri build -- --bundles nsis
+# exe:  src-tauri/target/release/ai_cli_profile_isolator.exe
+# nsis: src-tauri/target/release/bundle/nsis/*.exe
 ```
 
 ## 说明
 
-- **免安装**：单文件 exe 即可运行（需 WebView2）
-- zip 内含 `README-PORTABLE.txt` 简短说明
-- 安装包（NSIS）可在 `tauri.conf.json` 的 `bundle.targets` 中启用；CI 当前为加快构建使用 `--no-bundle`
-- CI 日志会打印 `sha256 exe=...` / `sha256 zip=...`，发版后可对照校验下载完整性
-- 应用内 **More → About** 显示当前 `CARGO_PKG_VERSION`（与 `desktop/src-tauri/Cargo.toml` 一致）
+- **免安装**：单文件 exe（需 WebView2）
+- **安装包**：可选，适合希望开始菜单/卸载的用户
+- 应用内 **More → About** 显示 `CARGO_PKG_VERSION`

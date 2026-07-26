@@ -1,4 +1,4 @@
-# Build Windows portable Profile Isolator and publish on version tags.
+# Build Windows portable + NSIS installer; publish on version tags with SHA256.
 name: Release Windows
 
 on:
@@ -8,21 +8,25 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Optional existing tag to attach assets to (e.g. v1.0.4). Leave empty to only build artifacts."
+        description: "Optional existing tag to attach assets to (e.g. v1.0.6). Leave empty to only build artifacts."
         required: false
         default: ""
+      with_installer:
+        description: "Build NSIS installer (slower). Always on for version tags."
+        type: boolean
+        required: false
+        default: true
 
 permissions:
   contents: write
 
 env:
   CARGO_TERM_COLOR: always
-  # Avoid interactive prompts
   CI: true
 
 jobs:
   build-windows:
-    name: Build portable (Windows)
+    name: Build Windows packages
     runs-on: windows-latest
     defaults:
       run:
@@ -52,11 +56,22 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Build Tauri (no installer bundle)
-        # Single .exe is enough for portable zip; NSIS needs extra time and is optional later.
-        run: npm run tauri build -- --no-bundle
+      - name: Build Tauri (NSIS + exe)
+        # bundle.targets already includes nsis in tauri.conf.json
+        # Tag pushes always build installer; manual runs follow with_installer input.
+        run: |
+          $ErrorActionPreference = "Stop"
+          $isTag = $env:GITHUB_REF.StartsWith("refs/tags/v")
+          $wantNsis = $isTag -or ("${{ inputs.with_installer }}" -eq "true")
+          if ($wantNsis) {
+            Write-Host "Building with NSIS bundle…"
+            npm run tauri build -- --bundles nsis
+          } else {
+            Write-Host "Building portable exe only (--no-bundle)…"
+            npm run tauri build -- --no-bundle
+          }
 
-      - name: Package portable zip
+      - name: Package portable zip, installer, checksums
         working-directory: ${{ github.workspace }}
         run: |
           $ErrorActionPreference = "Stop"
@@ -65,6 +80,7 @@ jobs:
             throw "Missing build output: $releaseExe"
           }
 
+          New-Item -ItemType Directory -Force -Path "dist-portable" | Out-Null
           $stage = New-Item -ItemType Directory -Force -Path "dist-portable/ProfileIsolator"
           Copy-Item $releaseExe (Join-Path $stage.FullName "ProfileIsolator.exe") -Force
           Copy-Item "packaging/README-PORTABLE.txt" (Join-Path $stage.FullName "README-PORTABLE.txt") -Force
@@ -72,21 +88,48 @@ jobs:
           $zip = "dist-portable/ProfileIsolator-windows-portable.zip"
           if (Test-Path $zip) { Remove-Item $zip -Force }
           Compress-Archive -Path (Join-Path $stage.FullName "*") -DestinationPath $zip -Force
-
-          # Also keep a flat exe for direct download
           Copy-Item $releaseExe "dist-portable/ProfileIsolator.exe" -Force
 
-          Get-ChildItem dist-portable | Format-Table Name, Length, LastWriteTime
-          "sha256 exe=$((Get-FileHash dist-portable/ProfileIsolator.exe -Algorithm SHA256).Hash)"
-          "sha256 zip=$((Get-FileHash $zip -Algorithm SHA256).Hash)"
+          # NSIS installer (if produced)
+          $nsisDir = "desktop/src-tauri/target/release/bundle/nsis"
+          $setup = $null
+          if (Test-Path $nsisDir) {
+            $setup = Get-ChildItem $nsisDir -Filter "*.exe" -File -ErrorAction SilentlyContinue |
+              Sort-Object LastWriteTime -Descending |
+              Select-Object -First 1
+          }
+          if ($setup) {
+            Copy-Item $setup.FullName "dist-portable/ProfileIsolator-setup.exe" -Force
+            Write-Host "Installer: $($setup.Name) -> ProfileIsolator-setup.exe"
+          } else {
+            Write-Host "No NSIS installer found (portable-only build)."
+          }
+
+          # SHA256SUMS.txt (coreutils-style: HASH  filename)
+          $sums = New-Object System.Collections.Generic.List[string]
+          Get-ChildItem "dist-portable" -File | Where-Object {
+            $_.Name -match '\.(exe|zip)$'
+          } | Sort-Object Name | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            $line = "$hash  $($_.Name)"
+            $sums.Add($line)
+            Write-Host "sha256 $($_.Name)=$hash size=$($_.Length)"
+          }
+          $sumsPath = "dist-portable/SHA256SUMS.txt"
+          $sums | Set-Content -Path $sumsPath -Encoding ascii
+          Get-Content $sumsPath
+
+          Get-ChildItem dist-portable -File | Format-Table Name, Length, LastWriteTime
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ProfileIsolator-windows-portable
+          name: ProfileIsolator-windows
           path: |
             dist-portable/ProfileIsolator.exe
             dist-portable/ProfileIsolator-windows-portable.zip
+            dist-portable/ProfileIsolator-setup.exe
+            dist-portable/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 14
 
@@ -100,28 +143,59 @@ jobs:
           $tag = $env:GITHUB_REF_NAME
           $exe = "dist-portable/ProfileIsolator.exe"
           $zip = "dist-portable/ProfileIsolator-windows-portable.zip"
+          $setup = "dist-portable/ProfileIsolator-setup.exe"
+          $sums = "dist-portable/SHA256SUMS.txt"
           $notesFile = "dist-portable/RELEASE_NOTES.md"
-          @"
+
+          $hasSetup = Test-Path $setup
+          $sumsBody = (Get-Content $sums -Raw).Trim()
+
+          $installerRow = if ($hasSetup) {
+            "| ``ProfileIsolator-setup.exe`` | NSIS installer (Start Menu / uninstall) |"
+          } else { "" }
+
+          $notes = @"
           # Profile Isolator $tag
 
-          ## Windows portable
+          ## Windows downloads
 
           | File | Use |
           |------|-----|
-          | ``ProfileIsolator.exe`` | Run directly (WebView2 required; preinstalled on most Win11) |
+          | ``ProfileIsolator.exe`` | Portable — run directly (WebView2; usually on Win11) |
           | ``ProfileIsolator-windows-portable.zip`` | exe + short readme |
+          $installerRow
+          | ``SHA256SUMS.txt`` | Checksums for the files above |
+
+          ### Verify (PowerShell)
+
+          ``````powershell
+          Get-FileHash .\ProfileIsolator.exe -Algorithm SHA256
+          # Compare to the line in SHA256SUMS.txt
+          ``````
+
+          ### SHA256
+
+          ``````
+          $sumsBody
+          ``````
 
           ### Notes
-          - No installer required — unpack/run anywhere
+          - Portable needs no installer; setup is optional
           - Close running Codex/Claude before renaming profiles or moving profile trees
           - Working directory set → per-project session view for faster ``/resume``
-          "@ -replace '(?m)^[ \t]+','' | Set-Content -Path $notesFile -Encoding utf8
+          "@
+          ($notes -replace '(?m)^[ \t]+','') | Set-Content -Path $notesFile -Encoding utf8
 
-          $view = gh release view $tag 2>&1
+          $assets = @($exe, $zip, $sums)
+          if ($hasSetup) { $assets += $setup }
+
+          gh release view $tag 2>&1 | Out-Null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag $exe $zip --clobber
+            gh release upload $tag @assets --clobber
+            # Refresh notes with checksums
+            gh release edit $tag --notes-file $notesFile
           } else {
-            gh release create $tag $exe $zip --title $tag --notes-file $notesFile
+            gh release create $tag @assets --title $tag --notes-file $notesFile
           }
           gh release view $tag --json url,tagName,assets
 
@@ -133,8 +207,14 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $tag = "${{ inputs.tag }}"
-          $exe = "dist-portable/ProfileIsolator.exe"
-          $zip = "dist-portable/ProfileIsolator-windows-portable.zip"
+          $assets = @(
+            "dist-portable/ProfileIsolator.exe",
+            "dist-portable/ProfileIsolator-windows-portable.zip",
+            "dist-portable/SHA256SUMS.txt"
+          )
+          if (Test-Path "dist-portable/ProfileIsolator-setup.exe") {
+            $assets += "dist-portable/ProfileIsolator-setup.exe"
+          }
           gh release view $tag | Out-Null
-          gh release upload $tag $exe $zip --clobber
-          gh release view $tag --json url,tagName,assets --jq .
+          gh release upload $tag @assets --clobber
+          gh release view $tag --json url,tagName,assets

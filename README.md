@@ -64,8 +64,11 @@
 
 ## 下载
 
-- **Windows 预编译（免安装）**：[Releases](https://github.com/lottshin/profile-isolator/releases)  
-  - 推荐最新：`ProfileIsolator.exe` 或 `ProfileIsolator-windows-portable.zip`  
+- **Windows**：[Releases](https://github.com/lottshin/profile-isolator/releases)  
+  - `ProfileIsolator.exe` — **免安装**，直接运行  
+  - `ProfileIsolator-windows-portable.zip` — exe + 简短说明  
+  - `ProfileIsolator-setup.exe` — **NSIS 安装包**（开始菜单 / 卸载）  
+  - `SHA256SUMS.txt` — 校验和（可用 `Get-FileHash` 对照）  
   - 需 WebView2（Win11 一般已自带）
 - 维护者发版：推送 `v*` tag 触发 CI，见 [docs/RELEASING.md](docs/RELEASING.md)
 
