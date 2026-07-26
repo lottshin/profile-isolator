@@ -1,7 +1,7 @@
 {
   "name": "ai-cli-profile-isolator",
   "private": true,
-  "version": "1.0.5",
+  "version": "1.0.6",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -27,5 +27,6 @@
     "vite": "^6.3.5"
   }
 }
+
 
 
