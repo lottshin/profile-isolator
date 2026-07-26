@@ -70,3 +70,6 @@ desktop/src/**/*.css.bak
 docs/screenshots/_*.py
 docs/screenshots/*.original.png
 docs/screenshots/*-raw.png
+
+# CI / local portable staging
+dist-portable/

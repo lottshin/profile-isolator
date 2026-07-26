@@ -1,0 +1,140 @@
+# Build Windows portable Profile Isolator and publish on version tags.
+name: Release Windows
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Optional existing tag to attach assets to (e.g. v1.0.4). Leave empty to only build artifacts."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # Avoid interactive prompts
+  CI: true
+
+jobs:
+  build-windows:
+    name: Build portable (Windows)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: desktop
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri -> target
+          shared-key: tauri-windows
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build Tauri (no installer bundle)
+        # Single .exe is enough for portable zip; NSIS needs extra time and is optional later.
+        run: npm run tauri build -- --no-bundle
+
+      - name: Package portable zip
+        working-directory: ${{ github.workspace }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $releaseExe = "desktop/src-tauri/target/release/ai_cli_profile_isolator.exe"
+          if (-not (Test-Path $releaseExe)) {
+            throw "Missing build output: $releaseExe"
+          }
+
+          $stage = New-Item -ItemType Directory -Force -Path "dist-portable/ProfileIsolator"
+          Copy-Item $releaseExe (Join-Path $stage.FullName "ProfileIsolator.exe") -Force
+          Copy-Item "packaging/README-PORTABLE.txt" (Join-Path $stage.FullName "README-PORTABLE.txt") -Force
+
+          $zip = "dist-portable/ProfileIsolator-windows-portable.zip"
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          Compress-Archive -Path (Join-Path $stage.FullName "*") -DestinationPath $zip -Force
+
+          # Also keep a flat exe for direct download
+          Copy-Item $releaseExe "dist-portable/ProfileIsolator.exe" -Force
+
+          Get-ChildItem dist-portable | Format-Table Name, Length, LastWriteTime
+          "sha256 exe=$((Get-FileHash dist-portable/ProfileIsolator.exe -Algorithm SHA256).Hash)"
+          "sha256 zip=$((Get-FileHash $zip -Algorithm SHA256).Hash)"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ProfileIsolator-windows-portable
+          path: |
+            dist-portable/ProfileIsolator.exe
+            dist-portable/ProfileIsolator-windows-portable.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish GitHub Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        working-directory: ${{ github.workspace }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tag = $env:GITHUB_REF_NAME
+          $exe = "dist-portable/ProfileIsolator.exe"
+          $zip = "dist-portable/ProfileIsolator-windows-portable.zip"
+          $notesFile = "dist-portable/RELEASE_NOTES.md"
+          @"
+          # Profile Isolator $tag
+
+          ## Windows portable
+
+          | File | Use |
+          |------|-----|
+          | ``ProfileIsolator.exe`` | Run directly (WebView2 required; preinstalled on most Win11) |
+          | ``ProfileIsolator-windows-portable.zip`` | exe + short readme |
+
+          ### Notes
+          - No installer required — unpack/run anywhere
+          - Close running Codex/Claude before renaming profiles or moving profile trees
+          - Working directory set → per-project session view for faster ``/resume``
+          "@ -replace '(?m)^[ \t]+','' | Set-Content -Path $notesFile -Encoding utf8
+
+          $view = gh release view $tag 2>&1
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag $exe $zip --clobber
+          } else {
+            gh release create $tag $exe $zip --title $tag --notes-file $notesFile
+          }
+          gh release view $tag --json url,tagName,assets
+
+      - name: Attach to existing release (workflow_dispatch)
+        if: github.event_name == 'workflow_dispatch' && inputs.tag != ''
+        working-directory: ${{ github.workspace }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tag = "${{ inputs.tag }}"
+          $exe = "dist-portable/ProfileIsolator.exe"
+          $zip = "dist-portable/ProfileIsolator-windows-portable.zip"
+          gh release view $tag | Out-Null
+          gh release upload $tag $exe $zip --clobber
+          gh release view $tag --json url,tagName,assets --jq .

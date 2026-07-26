@@ -63,8 +63,11 @@
 
 ## 下载
 
-- **Windows 预编译**：[Releases](https://github.com/lottshin/profile-isolator/releases)  
-  直接运行 `ProfileIsolator-v*.exe`（需 WebView2，Win11 一般已自带）
+- **Windows 预编译（免安装）**：[Releases](https://github.com/lottshin/profile-isolator/releases)  
+  - `ProfileIsolator.exe` — 直接运行  
+  - `ProfileIsolator-windows-portable.zip` — exe + 简短说明  
+  - 需 WebView2（Win11 一般已自带）
+- 维护者发版方式见 [docs/RELEASING.md](docs/RELEASING.md)（推送 `v*` tag 即触发 CI）
 
 ## 快速使用（多供应商并行）
 

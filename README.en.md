@@ -63,7 +63,13 @@ How:
 
 ## Download
 
-Prebuilt Windows exe: [Releases](https://github.com/lottshin/profile-isolator/releases).
+Windows **portable** (no installer): [Releases](https://github.com/lottshin/profile-isolator/releases)
+
+- `ProfileIsolator.exe` — run directly  
+- `ProfileIsolator-windows-portable.zip` — exe + short readme  
+- Requires WebView2 (usually preinstalled on Windows 11)
+
+Maintainers: push a `v*` tag to build via CI — see [docs/RELEASING.md](docs/RELEASING.md).
 
 ## Quick start (parallel providers)
 
