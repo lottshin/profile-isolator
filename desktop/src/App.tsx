@@ -85,6 +85,7 @@ export default function App() {
   const moreLeaveTimer = useRef<number | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  const [renameError, setRenameError] = useState<string | null>(null);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const [draggingName, setDraggingName] = useState<string | null>(null);
@@ -463,6 +464,7 @@ export default function App() {
   function startRename(name: string) {
     setRenaming(name);
     setRenameValue(name);
+    setRenameError(null);
     window.setTimeout(() => {
       renameInputRef.current?.focus();
       renameInputRef.current?.select();
@@ -474,9 +476,11 @@ export default function App() {
     const next = renameValue.trim();
     if (!next || next === renaming) {
       setRenaming(null);
+      setRenameError(null);
       return;
     }
     try {
+      setRenameError(null);
       await api.renameProfile(engine.key, renaming, next);
       // Migrate remembered workdir key
       const oldWd = loadWorkDir(engine.key, renaming);
@@ -491,10 +495,14 @@ export default function App() {
       selectedByEngine.current[engine.key] = next;
       setSelected(next);
       setRenaming(null);
+      setRenameError(null);
       await refresh(next);
       flash("ok", `Renamed to ${next}`);
     } catch (e) {
-      flash("error", String(e));
+      const msg = formatInvokeError(e);
+      setRenameError(msg);
+      // Keep inline editor open so the user can retry after closing Codex
+      flash("error", msg.split("\n")[0] || "Rename failed", 5000);
     }
   }
 
@@ -1008,9 +1016,12 @@ export default function App() {
                 {renaming === p.name ? (
                   <input
                     ref={renameInputRef}
-                    className="rename-input"
+                    className={`rename-input${renameError && renaming === p.name ? " invalid" : ""}`}
                     value={renameValue}
-                    onChange={(e) => setRenameValue(e.target.value)}
+                    onChange={(e) => {
+                      setRenameValue(e.target.value);
+                      if (renameError) setRenameError(null);
+                    }}
                     onClick={(e) => e.stopPropagation()}
                     onKeyDown={(e) => {
                       e.stopPropagation();
@@ -1020,9 +1031,16 @@ export default function App() {
                       } else if (e.key === "Escape") {
                         e.preventDefault();
                         setRenaming(null);
+                        setRenameError(null);
                       }
                     }}
-                    onBlur={() => void commitRename()}
+                    onBlur={() => {
+                      // Delay so click on Dismiss / other controls can run first
+                      window.setTimeout(() => {
+                        if (document.activeElement === renameInputRef.current) return;
+                        void commitRename();
+                      }, 120);
+                    }}
                   />
                 ) : (
                   <div className="name" title="Double-click or F2 to rename">
@@ -1093,6 +1111,19 @@ export default function App() {
               </div>
             </div>
           ))}
+          {renameError && (
+            <div className="launch-error" role="alert" style={{ margin: "8px" }}>
+              <div className="launch-error-title">Rename failed</div>
+              <pre className="launch-error-body">{renameError}</pre>
+              <button
+                type="button"
+                className="btn sm"
+                onClick={() => setRenameError(null)}
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
           {profiles.length === 0 && (
             <div className="empty" style={{ minHeight: 120 }}>
               <p>No profiles yet.</p>

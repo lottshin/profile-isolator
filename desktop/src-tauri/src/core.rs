@@ -553,23 +553,39 @@ pub fn rename_profile(engine_key: &str, old_name: &str, new_name: &str) -> Resul
     if !from.is_dir() {
         return Err(format!("Profile '{old_safe}' not found"));
     }
-    if to.exists() && !from
-        .canonicalize()
-        .ok()
-        .zip(to.canonicalize().ok())
-        .map(|(a, b)| a == b)
-        .unwrap_or(false)
+    if to.exists()
+        && !from
+            .canonicalize()
+            .ok()
+            .zip(to.canonicalize().ok())
+            .map(|(a, b)| a == b)
+            .unwrap_or(false)
     {
         return Err(format!("Profile already exists: {new_safe}"));
     }
 
+    // Best-effort: drop our own open handles on sqlite sidecars under this profile
+    // (Codex processes holding CODEX_HOME still block rename — we detect that below.)
+    release_profile_file_pressure(&from);
+
+    let do_rename = |src: &Path, dst: &Path| -> Result<(), String> {
+        fs::rename(src, dst).map_err(|e| map_rename_error(e, src))
+    };
+
     // Windows case-only rename: temp hop
     if old_safe.eq_ignore_ascii_case(&new_safe) && old_safe != new_safe {
         let tmp = root.join(format!(".__rename_{}_{}", std::process::id(), old_safe));
-        fs::rename(&from, &tmp).map_err(|e| format!("Rename failed: {e}"))?;
-        fs::rename(&tmp, &to).map_err(|e| format!("Rename failed: {e}"))?;
-    } else {
-        fs::rename(&from, &to).map_err(|e| format!("Rename failed: {e}"))?;
+        do_rename(&from, &tmp)?;
+        if let Err(e) = do_rename(&tmp, &to) {
+            // try rollback
+            let _ = fs::rename(&tmp, &from);
+            return Err(e);
+        }
+    } else if let Err(e) = do_rename(&from, &to) {
+        // One retry after brief pause (handles transient locks)
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        release_profile_file_pressure(&from);
+        do_rename(&from, &to).map_err(|_| e)?;
     }
 
     // Keep sidebar order in sync
@@ -584,6 +600,84 @@ pub fn rename_profile(engine_key: &str, old_name: &str, new_name: &str) -> Resul
     }
 
     Ok(to.display().to_string())
+}
+
+fn map_rename_error(e: std::io::Error, from: &Path) -> String {
+    let code = e.raw_os_error();
+    let base = format!("Rename failed: {e}");
+    // Windows ERROR_ACCESS_DENIED = 5, ERROR_SHARING_VIOLATION = 32
+    let locked = matches!(code, Some(5) | Some(32));
+    if !locked {
+        return base;
+    }
+    let holders = detect_codex_holders(from);
+    if holders.is_empty() {
+        format!(
+            "{base}\n\nThis profile folder is in use (Access denied).\nClose any Codex/Claude windows started with this profile, then rename again.\nFolder:\n{}",
+            from.display()
+        )
+    } else {
+        format!(
+            "{base}\n\nThis profile is locked by running process(es):\n{holders}\n\nClose those Codex/Claude windows (or end the process), then rename again.\nFolder:\n{}",
+            from.display()
+        )
+    }
+}
+
+/// Best-effort close of WAL/SHM junk we may have opened; does not kill user CLI.
+fn release_profile_file_pressure(profile: &Path) {
+    // Touch-remove only ephemeral lock files we create; never delete user data.
+    for name in ["tmp", ".tmp"] {
+        let p = profile.join(name);
+        if p.is_dir() {
+            // remove empty lock leftovers under tmp/arg0 if any
+            if let Ok(rd) = fs::read_dir(&p) {
+                for e in rd.flatten() {
+                    let path = e.path();
+                    if path.extension().and_then(|x| x.to_str()) == Some("lock") {
+                        let _ = fs::remove_file(&path);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Find codex-related processes whose command line / cwd mentions this profile path.
+fn detect_codex_holders(profile: &Path) -> String {
+    let needle = profile.display().to_string().to_ascii_lowercase();
+    let needle2 = profile
+        .file_name()
+        .map(|s| s.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    // PowerShell one-shot — CREATE_NO_WINDOW
+    let script = format!(
+        r#"$ErrorActionPreference='SilentlyContinue'
+$n1 = '{needle}'
+$n2 = '{needle2}'
+Get-CimInstance Win32_Process -Filter "Name='codex.exe' OR Name='node.exe' OR Name='codex-code-mode-host.exe'" |
+  ForEach-Object {{
+    $cl = ($_.CommandLine + '')
+    $clL = $cl.ToLowerInvariant()
+    if ($clL.Contains($n1) -or ($n2.Length -gt 0 -and $clL.Contains(('codexprofiles\\' + $n2)))) {{
+      $short = if ($cl.Length -gt 120) {{ $cl.Substring(0,120) + '…' }} else {{ $cl }}
+      Write-Output ('PID ' + $_.ProcessId + ' ' + $_.Name + ' — ' + $short)
+    }}
+  }}
+"#
+    );
+    let mut cmd = Command::new("powershell.exe");
+    cmd.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let Ok(out) = cmd.output() else {
+        return String::new();
+    };
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
 fn sanitize_codex(text: &str) -> String {
