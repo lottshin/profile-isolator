@@ -76,4 +76,5 @@ dist-portable/
 
 # Local verify / scratch release notes
 _verify*/
+_ci_art*/
 RELEASE_NOTES_v*.md
