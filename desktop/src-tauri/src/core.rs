@@ -1065,6 +1065,106 @@ fn hardlink_or_copy(src: &Path, dst: &Path) -> Result<(), String> {
     }
 }
 
+/// Copy/hardlink any real (non-junction) profile-local session jsonl into the shared library.
+/// Project-view mode uses a normal `sessions/` folder, so Codex writes new rollouts only there;
+/// without promotion, other profiles and shared scans never see them.
+fn promote_local_sessions_to_shared(profile: &Path, shared_sessions: &Path) -> u32 {
+    let local = profile.join("sessions");
+    if !local.is_dir() || is_reparse_point(&local) || local.is_symlink() {
+        return 0;
+    }
+    let _ = fs::create_dir_all(shared_sessions);
+    let mut n = 0u32;
+    for entry in WalkDir::new(&local).into_iter().filter_map(|e| e.ok()) {
+        let p = entry.path();
+        if !p.is_file() || p.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Ok(rel) = p.strip_prefix(&local) else {
+            continue;
+        };
+        let dest = shared_sessions.join(rel);
+        if dest.exists() {
+            // Prefer larger/newer local file if shared stub is smaller
+            let loc_sz = p.metadata().map(|m| m.len()).unwrap_or(0);
+            let sh_sz = dest.metadata().map(|m| m.len()).unwrap_or(0);
+            if loc_sz <= sh_sz {
+                continue;
+            }
+            let _ = fs::remove_file(&dest);
+        }
+        if hardlink_or_copy(p, &dest).is_ok() {
+            n += 1;
+        }
+    }
+    n
+}
+
+fn promote_all_profile_local_sessions(engine: &EngineInfo, shared_sessions: &Path) -> u32 {
+    let root = profiles_root(engine);
+    let Ok(rd) = fs::read_dir(&root) else {
+        return 0;
+    };
+    let mut total = 0u32;
+    for e in rd.flatten() {
+        let p = e.path();
+        if !p.is_dir() {
+            continue;
+        }
+        let name = p
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if name.starts_with('.') || name.starts_with('_') {
+            continue;
+        }
+        total += promote_local_sessions_to_shared(&p, shared_sessions);
+    }
+    total
+}
+
+fn collect_sessions_for_cwd(
+    sessions_root: &Path,
+    want: &str,
+    matched: &mut Vec<(PathBuf, String, String)>,
+    seen_rel: &mut HashSet<String>,
+) {
+    if !sessions_root.is_dir() {
+        return;
+    }
+    for entry in WalkDir::new(sessions_root)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let p = entry.path();
+        if !p.is_file() || p.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Some((cwd, id)) = read_session_meta_head(p) else {
+            continue;
+        };
+        if normalize_cwd_key(&cwd) != want {
+            continue;
+        }
+        let rel = p
+            .strip_prefix(sessions_root)
+            .map(|r| r.to_path_buf())
+            .unwrap_or_else(|_| PathBuf::from(p.file_name().unwrap_or_default()));
+        let rel_s = rel.to_string_lossy().replace('/', "\\");
+        if !seen_rel.insert(rel_s.clone()) {
+            continue;
+        }
+        let sid = if id.is_empty() {
+            p.file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default()
+        } else {
+            id
+        };
+        matched.push((p.to_path_buf(), rel_s, sid));
+    }
+}
+
 /// Build a slim CODEX_HOME session tree for one project cwd.
 /// Returns number of session files linked into the view.
 /// Skips rebuild when `.session-view.json` already matches cwd and shared library mtimes.
@@ -1078,10 +1178,18 @@ fn apply_project_session_view(
     }
     let shared = shared_session_home(engine);
     let shared_sessions = shared.join("sessions");
+    let _ = fs::create_dir_all(&shared_sessions);
     if !shared_sessions.is_dir() {
-        // No global library — fall back to normal share setup
         ensure_sessions_shared(engine, profile)?;
         return Ok(0);
+    }
+
+    // CRITICAL: project-view uses a real local sessions/ dir, so new Codex rollouts land
+    // only under the profile. Promote those (and other profiles' local-only rollouts)
+    // into the shared library before scanning / rebuilding the view.
+    let promoted = promote_all_profile_local_sessions(engine, &shared_sessions);
+    if promoted > 0 {
+        // force cache miss by continuing past fingerprint check after promotion
     }
 
     let want = normalize_cwd_key(work_dir);
@@ -1091,68 +1199,46 @@ fn apply_project_session_view(
     let shared_index = shared.join("session_index.jsonl");
 
     // Fast path: reuse existing project view if cwd matches and shared data not newer
-    if let Ok(raw) = fs::read_to_string(&marker_path) {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
-            let mode_ok = v.get("mode").and_then(|m| m.as_str()) == Some("project-view");
-            let prev_cwd = v
-                .get("cwd")
-                .and_then(|c| c.as_str())
-                .map(normalize_cwd_key)
-                .unwrap_or_default();
-            let prev_n = v.get("sessions").and_then(|s| s.as_u64()).unwrap_or(0);
-            let fingerprint = v
-                .get("fingerprint")
-                .and_then(|f| f.as_str())
-                .unwrap_or("")
-                .to_string();
-            let cur_fp = session_lib_fingerprint(&shared_sessions, &shared_index);
-            if mode_ok
-                && prev_cwd == want
-                && fingerprint == cur_fp
-                && local_sessions.is_dir()
-                && !is_reparse_point(&local_sessions)
-                && local_index.is_file()
-            {
-                return Ok(prev_n as usize);
+    // Skip cache if we just promoted files (shared library changed).
+    if promoted == 0 {
+        if let Ok(raw) = fs::read_to_string(&marker_path) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+                let mode_ok = v.get("mode").and_then(|m| m.as_str()) == Some("project-view");
+                let prev_cwd = v
+                    .get("cwd")
+                    .and_then(|c| c.as_str())
+                    .map(normalize_cwd_key)
+                    .unwrap_or_default();
+                let prev_n = v.get("sessions").and_then(|s| s.as_u64()).unwrap_or(0);
+                let fingerprint = v
+                    .get("fingerprint")
+                    .and_then(|f| f.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let cur_fp = session_lib_fingerprint(&shared_sessions, &shared_index);
+                if mode_ok
+                    && prev_cwd == want
+                    && fingerprint == cur_fp
+                    && local_sessions.is_dir()
+                    && !is_reparse_point(&local_sessions)
+                    && local_index.is_file()
+                    && prev_n > 0
+                {
+                    return Ok(prev_n as usize);
+                }
             }
         }
     }
 
     let mut matched: Vec<(PathBuf, String, String)> = Vec::new(); // abs path, rel, id
+    let mut seen_rel: HashSet<String> = HashSet::new();
 
-    for entry in WalkDir::new(&shared_sessions)
-        .into_iter()
-        .filter_map(|e| e.ok())
+    // Scan shared library
+    collect_sessions_for_cwd(&shared_sessions, &want, &mut matched, &mut seen_rel);
+    // Also scan current profile local dir before wipe (in case promote missed anything)
+    if local_sessions.is_dir() && !is_reparse_point(&local_sessions) && !local_sessions.is_symlink()
     {
-        let p = entry.path();
-        if !p.is_file() {
-            continue;
-        }
-        if p.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-            continue;
-        }
-        let Some((cwd, id)) = read_session_meta_head(p) else {
-            continue;
-        };
-        if normalize_cwd_key(&cwd) != want {
-            continue;
-        }
-        let rel = p
-            .strip_prefix(&shared_sessions)
-            .map(|r| r.to_path_buf())
-            .unwrap_or_else(|_| PathBuf::from(p.file_name().unwrap_or_default()));
-        let sid = if id.is_empty() {
-            p.file_stem()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_default()
-        } else {
-            id
-        };
-        matched.push((
-            p.to_path_buf(),
-            rel.to_string_lossy().replace('/', "\\"),
-            sid,
-        ));
+        collect_sessions_for_cwd(&local_sessions, &want, &mut matched, &mut seen_rel);
     }
 
     // Replace profile sessions/ with a real directory (not full-library junction)
