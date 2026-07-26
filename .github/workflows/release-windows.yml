@@ -125,11 +125,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ProfileIsolator-windows
-          path: |
-            dist-portable/ProfileIsolator.exe
-            dist-portable/ProfileIsolator-windows-portable.zip
-            dist-portable/ProfileIsolator-setup.exe
-            dist-portable/SHA256SUMS.txt
+          path: dist-portable/*
           if-no-files-found: error
           retention-days: 14
 
