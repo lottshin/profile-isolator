@@ -54,20 +54,20 @@
 
 - 为 **Codex / Claude Code** 分别管理多供应商 profile  
 - **Launch**：带隔离环境启动 CLI（可同时开多个，互不影响）  
-- 会话共享（junction 到默认 home），同一工作目录可跨供应商 `resume`  
+- 会话共享；**设置工作目录后按项目构建会话视图**，`/resume` 更快、只列当前项目  
 - 新建 / 导入 / **重命名** / **复制** / 删除 / **拖动排序**  
 - **工作目录按 profile 记忆**  
 - Codex + Claude 配置树可**一起搬到其他盘**  
 - 缓存查看 / 清理（不自动清会话）  
+- **About** 显示版本与 GitHub / Releases  
 - 浅色 / 深色 / 跟随系统  
 
 ## 下载
 
 - **Windows 预编译（免安装）**：[Releases](https://github.com/lottshin/profile-isolator/releases)  
-  - `ProfileIsolator.exe` — 直接运行  
-  - `ProfileIsolator-windows-portable.zip` — exe + 简短说明  
+  - 推荐最新：`ProfileIsolator.exe` 或 `ProfileIsolator-windows-portable.zip`  
   - 需 WebView2（Win11 一般已自带）
-- 维护者发版方式见 [docs/RELEASING.md](docs/RELEASING.md)（推送 `v*` tag 即触发 CI）
+- 维护者发版：推送 `v*` tag 触发 CI，见 [docs/RELEASING.md](docs/RELEASING.md)
 
 ## 快速使用（多供应商并行）
 
@@ -75,8 +75,9 @@
 2. 为供应商 A 建一个 profile（或 Import 当前配置后再改）  
 3. 在 Config / Auth 里填该供应商的 base_url、模型、Key → 保存  
 4. 再复制或新建 profile，改成供应商 B 的配置  
-5. 分别 **Launch** → 两个终端各自 `CODEX_HOME` / `CLAUDE_CONFIG_DIR` 不同，**同时使用不同供应商**  
-6. 工作目录选同一项目时，配合会话共享可跨 profile `resume`  
+5. **Working directory** 选项目路径（会记住；Codex 会按该目录过滤会话）  
+6. 分别 **Launch** → 两个终端各自 `CODEX_HOME` / `CLAUDE_CONFIG_DIR` 不同  
+7. 在 Codex 中 `/resume` 应看到**当前项目**历史（非全库慢扫）  
 
 默认路径：
 

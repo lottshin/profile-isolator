@@ -60,6 +60,16 @@ export type IsolatorSettings = {
   sandboxCacheRoot?: string | null;
 };
 
+export type AppAbout = {
+  name: string;
+  version: string;
+  description: string;
+  repo: string;
+  releases: string;
+  license: string;
+  platform: string;
+};
+
 async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const { invoke: inv } = await import("@tauri-apps/api/core");
   return inv<T>(cmd, args);
@@ -158,6 +168,7 @@ export const api = {
       base,
       leaveJunctionAtOld,
     }),
+  appAbout: () => invoke<AppAbout>("cmd_app_about"),
 };
 
 export function formatBytes(n: number): string {

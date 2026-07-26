@@ -73,3 +73,7 @@ docs/screenshots/*-raw.png
 
 # CI / local portable staging
 dist-portable/
+
+# Local verify / scratch release notes
+_verify*/
+RELEASE_NOTES_v*.md

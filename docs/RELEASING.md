@@ -42,3 +42,5 @@ npm run tauri build -- --no-bundle
 - **免安装**：单文件 exe 即可运行（需 WebView2）
 - zip 内含 `README-PORTABLE.txt` 简短说明
 - 安装包（NSIS）可在 `tauri.conf.json` 的 `bundle.targets` 中启用；CI 当前为加快构建使用 `--no-bundle`
+- CI 日志会打印 `sha256 exe=...` / `sha256 zip=...`，发版后可对照校验下载完整性
+- 应用内 **More → About** 显示当前 `CARGO_PKG_VERSION`（与 `desktop/src-tauri/Cargo.toml` 一致）

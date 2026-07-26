@@ -54,11 +54,12 @@ How:
 
 - Multi-provider profiles for **Codex and Claude Code**  
 - **Launch** isolated CLI processes (run many at once)  
-- Shared sessions (junctions) for cross-provider `resume`  
+- Shared sessions; with **Working directory** set, builds a **per-project session view** for faster `/resume`  
 - Create / import / **rename** / **duplicate** / delete / **reorder**  
 - **Working directory remembered per profile**  
 - Move both profile trees under one parent folder  
 - Cache inspect / clean (sessions not auto-deleted)  
+- **About** shows version and GitHub / Releases  
 - Light / Dark / System theme  
 
 ## Download
@@ -76,8 +77,9 @@ Maintainers: push a `v*` tag to build via CI — see [docs/RELEASING.md](docs/RE
 1. Open app → **Codex** (or **Claude Code**)  
 2. Create/import profile for provider A → set base URL, model, key → save  
 3. Duplicate or create profile for provider B → change vendor settings  
-4. **Launch** each → two terminals, two `CODEX_HOME` / `CLAUDE_CONFIG_DIR` values  
-5. Same working directory + shared sessions → `resume` across providers  
+4. Set **Working directory** to the project path (remembered; Codex session view is filtered to it)  
+5. **Launch** each → two terminals, two `CODEX_HOME` / `CLAUDE_CONFIG_DIR` values  
+6. In Codex, `/resume` lists **this project** history (not a full multi-GB scan)  
 
 Default paths:
 

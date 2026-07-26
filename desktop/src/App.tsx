@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { api, EngineInfo, ProfileSummary, CacheReport, formatBytes } from "./lib/api";
+import { api, EngineInfo, ProfileSummary, CacheReport, AppAbout, formatBytes } from "./lib/api";
 
 type Tab = "config" | "auth" | "launch" | "sessions";
 type Toast = { kind: "ok" | "error" | "info"; text: string } | null;
@@ -62,6 +62,8 @@ export default function App() {
   const [fromCurrent, setFromCurrent] = useState(true);
   const [doctorOpen, setDoctorOpen] = useState(false);
   const [doctorText, setDoctorText] = useState("");
+  const [aboutOpen, setAboutOpen] = useState(false);
+  const [about, setAbout] = useState<AppAbout | null>(null);
   const [busy, setBusy] = useState(false);
   const [cacheOpen, setCacheOpen] = useState(false);
   const [cacheReport, setCacheReport] = useState<CacheReport | null>(null);
@@ -631,6 +633,16 @@ export default function App() {
     }
   }
 
+  async function openAbout() {
+    try {
+      const info = await api.appAbout();
+      setAbout(info);
+      setAboutOpen(true);
+    } catch (e) {
+      flash("error", String(e));
+    }
+  }
+
 
   async function openCache() {
     if (!engine) return;
@@ -1147,6 +1159,18 @@ export default function App() {
                         Cache & storage
                         <span className="more-desc">Size, clean sandbox, move cache folder</span>
                       </button>
+                      <div className="more-sep" />
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setMoreOpen(false);
+                          void openAbout();
+                        }}
+                      >
+                        About
+                        <span className="more-desc">Version, license, GitHub</span>
+                      </button>
                     </div>
                   )}
                 </div>
@@ -1409,7 +1433,67 @@ Provider / base_url / model are in config.toml (Config tab).`}
         </div>
       )}
 
-      
+      {aboutOpen && about && (
+        <div className="scrim" onClick={() => setAboutOpen(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h3>About</h3>
+            <div className="about-body">
+              <div className="about-title">{about.name}</div>
+              <div className="about-ver">Version {about.version}</div>
+              <p className="about-desc">{about.description}</p>
+              <div className="about-meta">
+                <div>
+                  <span className="k">License</span> {about.license}
+                </div>
+                <div>
+                  <span className="k">Platform</span> {about.platform}
+                </div>
+              </div>
+              <div className="about-links">
+                <button
+                  type="button"
+                  className="btn sm"
+                  onClick={() => {
+                    void (async () => {
+                      try {
+                        const { open } = await import("@tauri-apps/plugin-shell");
+                        await open(about.repo);
+                      } catch (e) {
+                        flash("error", String(e));
+                      }
+                    })();
+                  }}
+                >
+                  GitHub
+                </button>
+                <button
+                  type="button"
+                  className="btn sm primary"
+                  onClick={() => {
+                    void (async () => {
+                      try {
+                        const { open } = await import("@tauri-apps/plugin-shell");
+                        await open(about.releases);
+                      } catch (e) {
+                        flash("error", String(e));
+                      }
+                    })();
+                  }}
+                >
+                  Releases
+                </button>
+              </div>
+            </div>
+            <div className="actions single">
+              <button className="btn primary block" onClick={() => setAboutOpen(false)}>
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+
       {cacheOpen && cacheReport && (
         <div className="scrim" onClick={() => setCacheOpen(false)}>
           <div className="modal wide" onClick={(e) => e.stopPropagation()}>

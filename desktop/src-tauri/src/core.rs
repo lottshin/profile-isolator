@@ -1067,6 +1067,7 @@ fn hardlink_or_copy(src: &Path, dst: &Path) -> Result<(), String> {
 
 /// Build a slim CODEX_HOME session tree for one project cwd.
 /// Returns number of session files linked into the view.
+/// Skips rebuild when `.session-view.json` already matches cwd and shared library mtimes.
 fn apply_project_session_view(
     engine: &EngineInfo,
     profile: &Path,
@@ -1084,7 +1085,40 @@ fn apply_project_session_view(
     }
 
     let want = normalize_cwd_key(work_dir);
-    let mut matched: Vec<(PathBuf, String, String)> = Vec::new(); // abs path, rel posix-ish, id
+    let marker_path = profile.join(".session-view.json");
+    let local_sessions = profile.join("sessions");
+    let local_index = profile.join("session_index.jsonl");
+    let shared_index = shared.join("session_index.jsonl");
+
+    // Fast path: reuse existing project view if cwd matches and shared data not newer
+    if let Ok(raw) = fs::read_to_string(&marker_path) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+            let mode_ok = v.get("mode").and_then(|m| m.as_str()) == Some("project-view");
+            let prev_cwd = v
+                .get("cwd")
+                .and_then(|c| c.as_str())
+                .map(normalize_cwd_key)
+                .unwrap_or_default();
+            let prev_n = v.get("sessions").and_then(|s| s.as_u64()).unwrap_or(0);
+            let fingerprint = v
+                .get("fingerprint")
+                .and_then(|f| f.as_str())
+                .unwrap_or("")
+                .to_string();
+            let cur_fp = session_lib_fingerprint(&shared_sessions, &shared_index);
+            if mode_ok
+                && prev_cwd == want
+                && fingerprint == cur_fp
+                && local_sessions.is_dir()
+                && !is_reparse_point(&local_sessions)
+                && local_index.is_file()
+            {
+                return Ok(prev_n as usize);
+            }
+        }
+    }
+
+    let mut matched: Vec<(PathBuf, String, String)> = Vec::new(); // abs path, rel, id
 
     for entry in WalkDir::new(&shared_sessions)
         .into_iter()
@@ -1114,11 +1148,14 @@ fn apply_project_session_view(
         } else {
             id
         };
-        matched.push((p.to_path_buf(), rel.to_string_lossy().replace('/', "\\"), sid));
+        matched.push((
+            p.to_path_buf(),
+            rel.to_string_lossy().replace('/', "\\"),
+            sid,
+        ));
     }
 
     // Replace profile sessions/ with a real directory (not full-library junction)
-    let local_sessions = profile.join("sessions");
     wipe_path(&local_sessions);
     fs::create_dir_all(&local_sessions).map_err(|e| e.to_string())?;
 
@@ -1135,8 +1172,6 @@ fn apply_project_session_view(
     }
 
     // Filtered session_index.jsonl
-    let shared_index = shared.join("session_index.jsonl");
-    let local_index = profile.join("session_index.jsonl");
     let id_set: HashSet<String> = matched.iter().map(|(_, _, id)| id.clone()).collect();
     if shared_index.is_file() && !id_set.is_empty() {
         let raw = fs::read_to_string(&shared_index).unwrap_or_default();
@@ -1155,7 +1190,6 @@ fn apply_project_session_view(
                 }
             }
         }
-        // If index had no matching ids, synthesize minimal entries
         if out.is_empty() {
             for (_, _, id) in &matched {
                 if id.is_empty() {
@@ -1185,15 +1219,18 @@ fn apply_project_session_view(
         }
         write_text(&local_index, &out)?;
     } else {
-        // No sessions for this cwd — empty index
         if local_index.exists() {
             let _ = fs::remove_file(&local_index);
         }
         write_text(&local_index, "")?;
     }
 
-    // history.jsonl: keep full shared hardlink (small relative to sessions); filter optional later
-    for fname in ["history.jsonl", "state_5.sqlite", "state_5.sqlite-shm", "state_5.sqlite-wal"] {
+    for fname in [
+        "history.jsonl",
+        "state_5.sqlite",
+        "state_5.sqlite-shm",
+        "state_5.sqlite-wal",
+    ] {
         let src = shared.join(fname);
         let dst = profile.join(fname);
         if !src.exists() {
@@ -1208,15 +1245,68 @@ fn apply_project_session_view(
         let _ = hardlink_or_copy(&src, &dst);
     }
 
-    // Marker for debugging / future cache invalidation
-    let marker = format!(
-        "{{\n  \"mode\": \"project-view\",\n  \"cwd\": {},\n  \"sessions\": {}\n}}\n",
-        serde_json::to_string(work_dir).unwrap_or_else(|_| "\"\"".into()),
-        matched.len()
+    let fingerprint = session_lib_fingerprint(&shared_sessions, &shared_index);
+    let marker = serde_json::json!({
+        "mode": "project-view",
+        "cwd": work_dir,
+        "cwdKey": want,
+        "sessions": matched.len(),
+        "fingerprint": fingerprint,
+    });
+    let _ = write_text(
+        &marker_path,
+        &format!("{}\n", serde_json::to_string_pretty(&marker).unwrap_or_default()),
     );
-    let _ = write_text(&profile.join(".session-view.json"), &marker);
 
     Ok(matched.len())
+}
+
+/// Cheap fingerprint of shared session library for cache invalidation.
+fn session_lib_fingerprint(shared_sessions: &Path, shared_index: &Path) -> String {
+    let mut file_count: u64 = 0;
+    let mut max_mtime: u64 = 0;
+    if shared_sessions.is_dir() {
+        for entry in WalkDir::new(shared_sessions)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let p = entry.path();
+            if p.is_file() && p.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+                file_count += 1;
+                if let Ok(meta) = p.metadata() {
+                    if let Ok(modified) = meta.modified() {
+                        if let Ok(secs) = modified.duration_since(std::time::UNIX_EPOCH) {
+                            max_mtime = max_mtime.max(secs.as_secs());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut index_mtime: u64 = 0;
+    let mut index_len: u64 = 0;
+    if let Ok(meta) = shared_index.metadata() {
+        index_len = meta.len();
+        if let Ok(modified) = meta.modified() {
+            if let Ok(secs) = modified.duration_since(std::time::UNIX_EPOCH) {
+                index_mtime = secs.as_secs();
+            }
+        }
+    }
+    format!("fc={file_count};mm={max_mtime};il={index_len};im={index_mtime}")
+}
+
+/// App version / about info for UI.
+pub fn app_about() -> serde_json::Value {
+    serde_json::json!({
+        "name": "Profile Isolator",
+        "version": env!("CARGO_PKG_VERSION"),
+        "description": "Isolate Codex CLI / Claude Code configs for different providers",
+        "repo": "https://github.com/lottshin/profile-isolator",
+        "releases": "https://github.com/lottshin/profile-isolator/releases",
+        "license": "MIT",
+        "platform": std::env::consts::OS,
+    })
 }
 
 fn unique_copy_name(root: &Path, base: &str) -> String {

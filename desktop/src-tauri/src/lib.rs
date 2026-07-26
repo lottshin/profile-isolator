@@ -190,6 +190,11 @@ fn cmd_set_profiles_base(
     set_profiles_base(base, leave_junction_at_old)
 }
 
+#[tauri::command]
+fn cmd_app_about() -> serde_json::Value {
+    app_about()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -223,7 +228,8 @@ pub fn run() {
             cmd_get_profiles_base,
             cmd_set_sandbox_cache_root,
             cmd_set_profiles_root,
-            cmd_set_profiles_base
+            cmd_set_profiles_base,
+            cmd_app_about
         ])
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
