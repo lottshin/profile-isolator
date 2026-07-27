@@ -75,12 +75,13 @@ pub fn engines() -> Vec<EngineInfo> {
             secondary_label: "auth.json".into(),
             command_names: vec!["codex".into()],
             session_dirs: vec!["sessions".into(), "archived_sessions".into()],
+            // NOTE: only share append-mostly *index* files. NEVER share state_5.sqlite
+            // (or its -shm/-wal): it is a per-profile runtime DB, and sharing it across
+            // profiles means concurrent Codex processes write the same file -> corruption
+            // ("file is not a database", code 26).
             session_files: vec![
                 "session_index.jsonl".into(),
                 "history.jsonl".into(),
-                "state_5.sqlite".into(),
-                "state_5.sqlite-shm".into(),
-                "state_5.sqlite-wal".into(),
             ],
             resume_cmd: "codex resume".into(),
             resume_all_cmd: "codex resume --all".into(),
@@ -945,14 +946,13 @@ fn link_session_index_files(
     profile: &Path,
     shared: &Path,
 ) -> Result<(), String> {
-    // Always try these known names even if engine.session_files is incomplete
+    // Always try these known names even if engine.session_files is incomplete.
+    // IMPORTANT: sqlite runtime DBs (state_5.sqlite / -shm / -wal) are intentionally
+    // excluded — sharing them across profiles corrupts them under concurrent Codex use.
     let mut names: Vec<String> = engine.session_files.clone();
     for extra in [
         "session_index.jsonl",
         "history.jsonl",
-        "state_5.sqlite",
-        "state_5.sqlite-shm",
-        "state_5.sqlite-wal",
         ".codex-global-state.json",
     ] {
         if !names.iter().any(|n| n == extra) {
@@ -961,6 +961,10 @@ fn link_session_index_files(
     }
 
     for fname in names {
+        // Hard guard: never share a per-profile sqlite runtime DB.
+        if fname.contains("sqlite") {
+            continue;
+        }
         let local = profile.join(&fname);
         let target = shared.join(&fname);
 
@@ -1157,6 +1161,96 @@ fn hardlink_or_copy(src: &Path, dst: &Path) -> Result<(), String> {
             Ok(())
         }
     }
+}
+
+/// Number of hard links to a file (Windows). Returns None if it can't be read.
+#[cfg(windows)]
+fn hard_link_count(path: &Path) -> Option<u32> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::AsRawHandle;
+
+    #[repr(C)]
+    struct ByHandleFileInformation {
+        file_attributes: u32,
+        creation_time: [u32; 2],
+        last_access_time: [u32; 2],
+        last_write_time: [u32; 2],
+        volume_serial_number: u32,
+        file_size_high: u32,
+        file_size_low: u32,
+        number_of_links: u32,
+        file_index_high: u32,
+        file_index_low: u32,
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetFileInformationByHandle(
+            handle: *mut core::ffi::c_void,
+            info: *mut ByHandleFileInformation,
+        ) -> i32;
+    }
+
+    // Open shared (no write lock) so we don't disturb a running Codex.
+    let f = fs::OpenOptions::new().read(true).open(path).ok()?;
+    let _keep_path: Vec<u16> = path.as_os_str().encode_wide().collect();
+    let mut info: ByHandleFileInformation = unsafe { std::mem::zeroed() };
+    let ok = unsafe {
+        GetFileInformationByHandle(f.as_raw_handle() as *mut core::ffi::c_void, &mut info)
+    };
+    if ok == 0 {
+        return None;
+    }
+    Some(info.number_of_links)
+}
+
+#[cfg(not(windows))]
+fn hard_link_count(_path: &Path) -> Option<u32> {
+    None
+}
+
+/// Legacy repair: older builds hard-linked `state_5.sqlite` (+ -shm/-wal) across
+/// profiles, which corrupts under concurrent Codex use. On Launch, if this profile's
+/// sqlite is still a shared hard link (link count > 1), break it into an independent
+/// private copy. If the file is locked (Codex running elsewhere), skip and report.
+fn detach_shared_state_db(profile: &Path) -> Result<bool, String> {
+    let mut detached_any = false;
+    for fname in ["state_5.sqlite", "state_5.sqlite-shm", "state_5.sqlite-wal"] {
+        let p = profile.join(fname);
+        if !p.is_file() {
+            continue;
+        }
+        // Only act when it is a shared hard link.
+        match hard_link_count(&p) {
+            Some(n) if n <= 1 => continue, // already private
+            None => continue,              // can't tell — leave it
+            _ => {}
+        }
+        // Copy to a temp then atomically replace, so the new file is a fresh inode.
+        let tmp = profile.join(format!(".{fname}.detach-{}", std::process::id()));
+        // Reading is safe even if another process has it open shared.
+        if fs::copy(&p, &tmp).is_err() {
+            // Locked or unreadable — cannot detach right now.
+            let _ = fs::remove_file(&tmp);
+            return Err(format!(
+                "'{}' is still shared and in use; close other Codex windows to finish repair.",
+                fname
+            ));
+        }
+        // Removing the link only drops THIS profile's name; other profiles keep their copy.
+        if fs::remove_file(&p).is_err() {
+            let _ = fs::remove_file(&tmp);
+            return Err(format!(
+                "Could not replace '{}' (in use). Close Codex for this profile and relaunch.",
+                fname
+            ));
+        }
+        if let Err(e) = fs::rename(&tmp, &p) {
+            let _ = fs::remove_file(&tmp);
+            return Err(format!("Failed to finalize '{}' repair: {e}", fname));
+        }
+        detached_any = true;
+    }
+    Ok(detached_any)
 }
 
 /// Copy/hardlink any real (non-junction) profile-local session jsonl into the shared library.
@@ -1405,12 +1499,11 @@ fn apply_project_session_view(
         write_text(&local_index, "")?;
     }
 
-    for fname in [
-        "history.jsonl",
-        "state_5.sqlite",
-        "state_5.sqlite-shm",
-        "state_5.sqlite-wal",
-    ] {
+    // NOTE: never share state_5.sqlite (+ -shm/-wal). It is Codex's per-profile
+    // runtime state DB; hardlinking it across profiles means several concurrently
+    // running Codex processes write the SAME sqlite file, which corrupts it
+    // ("file is not a database", code 26). Only session_index/history are shared.
+    for fname in ["history.jsonl"] {
         let src = shared.join(fname);
         let dst = profile.join(fname);
         if !src.exists() {
@@ -2043,6 +2136,18 @@ pub fn launch_profile(
     let mut session_mode = "full-share".to_string();
     let mut session_count: Option<usize> = None;
     let mut session_cached = false;
+
+    // Legacy repair: break any shared state_5.sqlite hard link into a private copy.
+    // Older builds shared it across profiles, which corrupts under concurrent use.
+    if engine.key == "codex" {
+        match detach_shared_state_db(&path) {
+            Ok(true) => warnings.push(
+                "Repaired shared runtime database (state_5.sqlite) into a private copy for this profile.".into(),
+            ),
+            Ok(false) => {}
+            Err(e) => warnings.push(format!("Runtime DB repair skipped: {e}")),
+        }
+    }
 
     // Validate optional working directory early (clear message for the UI)
     let wd = if raw_wd.is_empty() {

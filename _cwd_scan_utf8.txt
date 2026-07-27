@@ -1,0 +1,9 @@
+﻿want: D:\New_god\��Ŀ\my_project 3.6
+want exists: True
+want_norm: d:\new_god\��Ŀ\my_project 3.6
+want_norm_bytes: b'd:\\new_god\\\xe9\xa1\xb9\xe7\x9b\xae\\my_project 3.6'
+EXACT 0
+CONTAINS my_project 3.6: 0
+want resolve D:\New_god\��Ŀ\my_project 3.6
+want resolve norm d:\new_god\��Ŀ\my_project 3.6
+--- endswith my_project 3.6 ---
