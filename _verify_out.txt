@@ -1,8 +1,0 @@
-=== SHARED library: F:\CodexData\.codex\sessions ===
-  jsonl_files      = 925
-  first=session_meta = 925
-  bad_first_json   = 0
-  empty_files      = 0
-  truncated_last   = 0
-  total_size_MB    = 7440.1
-  ALL jsonl parse OK (no empty / bad / truncated)

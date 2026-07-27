@@ -32,17 +32,11 @@ _t/
 **/_tmp/
 **/.tmp/
 
-# Local helper scripts (machine-specific)
-_clean_c_disk.ps1
-_write_*.py
-_fix_*.py
-_add_*.py
-_patch_*.py
-_rebuild.bat
-_tauri_build.bat
-desktop/_*.py
-desktop/_*.bat
-desktop/_*.cmd
+# Local helper scripts / scratch output (machine-specific).
+# Any file or dir starting with "_" at repo root or under desktop/ is throwaway.
+_*
+desktop/_*
+docs/screenshots/_*
 
 # Secrets & personal config (never commit)
 .env
